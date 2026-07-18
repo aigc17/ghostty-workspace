@@ -2,6 +2,7 @@ import SwiftUI
 
 struct TerminalSplitTreeView: View {
     let tree: SplitTree<Ghostty.SurfaceView>
+    var showsPaneHeaders: Bool = false
     let onResize: (SplitTree<Ghostty.SurfaceView>.Node, Double) -> Void
 
     var body: some View {
@@ -9,6 +10,7 @@ struct TerminalSplitTreeView: View {
             TerminalSplitSubtreeView(
                 node: node,
                 isRoot: node == tree.root,
+                showsPaneHeaders: showsPaneHeaders,
                 onResize: onResize)
             // This is necessary because we can't rely on SwiftUI's implicit
             // structural identity to detect changes to this view. Due to
@@ -24,15 +26,18 @@ struct TerminalSplitSubtreeView: View {
 
     let node: SplitTree<Ghostty.SurfaceView>.Node
     var isRoot: Bool = false
+    var showsPaneHeaders: Bool = false
     let onResize: (SplitTree<Ghostty.SurfaceView>.Node, Double) -> Void
 
     var body: some View {
         switch (node) {
         case .leaf(let leafView):
-            // Zed-style: every pane gets a tab-like header that can be
+            // Zed-style: workspace panes get a tab-like header that can be
             // dragged to re-dock the pane elsewhere.
             VStack(spacing: 0) {
-                WorkspacePaneHeader(surface: leafView)
+                if showsPaneHeaders {
+                    WorkspacePaneHeader(surface: leafView)
+                }
                 Ghostty.InspectableSurface(
                     surfaceView: leafView,
                     isSplit: !isRoot)
@@ -56,10 +61,16 @@ struct TerminalSplitSubtreeView: View {
                 dividerColor: ghostty.config.splitDividerColor,
                 resizeIncrements: .init(width: 1, height: 1),
                 left: {
-                    TerminalSplitSubtreeView(node: split.left, onResize: onResize)
+                    TerminalSplitSubtreeView(
+                        node: split.left,
+                        showsPaneHeaders: showsPaneHeaders,
+                        onResize: onResize)
                 },
                 right: {
-                    TerminalSplitSubtreeView(node: split.right, onResize: onResize)
+                    TerminalSplitSubtreeView(
+                        node: split.right,
+                        showsPaneHeaders: showsPaneHeaders,
+                        onResize: onResize)
                 }
             )
         }

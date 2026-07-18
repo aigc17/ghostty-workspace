@@ -43,6 +43,11 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
     // An optional delegate to receive information about terminal changes.
     weak var delegate: (any TerminalViewDelegate)? = nil
 
+    // Whether panes show the workspace tab-like header (drag/split/close).
+    // Only the workspace terminal windows enable this; e.g. the quick
+    // terminal does not.
+    var showsPaneHeaders: Bool = false
+
     // The most recently focused surface, equal to focusedSurface when
     // it is non-nil.
     @State private var lastFocusedSurface: Weak<Ghostty.SurfaceView> = .init()
@@ -78,6 +83,7 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
 
                     TerminalSplitTreeView(
                         tree: viewModel.surfaceTree,
+                        showsPaneHeaders: showsPaneHeaders,
                         onResize: { delegate?.splitDidResize(node: $0, to: $1) })
                         .environmentObject(ghostty)
                         .focused($focused)

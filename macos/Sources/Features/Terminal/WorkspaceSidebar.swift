@@ -143,6 +143,23 @@ class ProjectManager: ObservableObject {
         save()
     }
 
+    /// Re-insert a previously removed session (undo path). Falls back to the
+    /// project matching the session's working directory if the original
+    /// project is gone.
+    func restore(_ session: WorkspaceSession, into project: WorkspaceProject?) {
+        let target: WorkspaceProject
+        if let project, projects.contains(where: { $0 === project }) {
+            target = project
+        } else {
+            target = self.project(forPath: session.workingDirectory)
+        }
+        if !target.sessions.contains(where: { $0 === session }) {
+            target.sessions.append(session)
+        }
+        target.expanded = true
+        save()
+    }
+
     func removeProject(_ project: WorkspaceProject) {
         projects.removeAll { $0 === project }
         save()
@@ -290,6 +307,26 @@ extension TerminalController {
         activateWorkspaceSession(session)
     }
 
+    /// Register an expiring undo that restores a closed session (its sidebar
+    /// row plus live tree). The captured tree keeps its processes alive until
+    /// the undo expires, matching upstream close-terminal semantics.
+    func registerWorkspaceSessionUndo(
+        _ session: WorkspaceSession,
+        project: WorkspaceProject? = nil,
+        tree: SplitTree<Ghostty.SurfaceView>? = nil
+    ) {
+        guard let undoManager else { return }
+        guard let tree = tree ?? session.tree, !tree.isEmpty else { return }
+        let project = project ?? ProjectManager.shared.project(containing: session)
+        session.syncTitle()
+        undoManager.setActionName("关闭对话")
+        undoManager.registerUndo(withTarget: self, expiresAfter: undoExpiration) { target in
+            ProjectManager.shared.restore(session, into: project)
+            session.tree = tree
+            target.activateWorkspaceSession(session)
+        }
+    }
+
     /// Close a session: kills its processes. If it's shown in a window, that
     /// window switches to the next session (or closes if none remain).
     func closeWorkspaceSession(_ session: WorkspaceSession) {
@@ -297,9 +334,21 @@ extension TerminalController {
         guard let owner = TerminalController.all.first(where: {
             $0.activeWorkspaceSession === session
         }) else {
-            // Hidden session: dropping the tree releases the surfaces.
-            session.tree = nil
-            manager.removeSession(session)
+            // Hidden session: same confirmation as every other close path,
+            // and undoable like closing a shown terminal.
+            let destroy = { [weak self] in
+                self?.registerWorkspaceSessionUndo(session)
+                session.tree = nil
+                manager.removeSession(session)
+            }
+            if session.tree?.contains(where: { $0.needsConfirmQuit }) ?? false {
+                confirmClose(
+                    messageText: "关闭对话?",
+                    informativeText: "该对话仍有正在运行的进程,关闭后进程将被终止。"
+                ) { destroy() }
+            } else {
+                destroy()
+            }
             return
         }
 
@@ -446,6 +495,11 @@ extension TerminalController {
         rootLocation: CGPoint
     ) {
         let state = workspaceDragState
+        // A stale payload from a cancelled gesture (onEnded never fired) must
+        // not hijack this new drag.
+        if let current = state.payload, current != payload {
+            state.reset()
+        }
         if state.payload == nil {
             state.payload = payload
             state.label = label
@@ -453,10 +507,11 @@ extension TerminalController {
         let frame = state.terminalFrame
         let local = CGPoint(x: rootLocation.x - frame.minX, y: rootLocation.y - frame.minY)
         state.location = local
-        let target = WorkspaceDockResolver.target(at: local, size: frame.size, tree: surfaceTree)
-        state.target = target
-        state.highlight = WorkspaceDockResolver.highlightRect(
-            for: target, size: frame.size, tree: surfaceTree)
+        // Single spatial pass per event; publish only actual changes.
+        let (target, highlight) = WorkspaceDockResolver.resolve(
+            at: local, size: frame.size, tree: surfaceTree)
+        if state.target != target { state.target = target }
+        if state.highlight != highlight { state.highlight = highlight }
     }
 
     /// Gesture-driven drag finished: perform the dock and clear the state.
@@ -547,6 +602,10 @@ extension TerminalController {
         let project = manager.project(containing: session)
         activeWorkspaceSession = nil
         workspaceState.activeSessionID = nil
+        // session.tree still holds the pre-close tree (kept in sync while the
+        // session was shown); hold onto it so Cmd+Z can restore the whole
+        // conversation with scrollback and processes.
+        let deadTree = session.tree
         session.tree = nil
         manager.removeSession(session)
         undoManager?.removeAllActions(withTarget: self)
@@ -558,7 +617,13 @@ extension TerminalController {
             return false
         }
         DispatchQueue.main.async { [weak self] in
-            self?.activateWorkspaceSession(next)
+            // The window may be mid-close (e.g. a closing tab group empties
+            // our tree); don't resurrect sessions into a dying window.
+            guard let self, let window = self.window, window.isVisible else { return }
+            self.activateWorkspaceSession(next)
+            // Register after activation (which clears cross-session undo
+            // entries) so this restore entry survives.
+            self.registerWorkspaceSessionUndo(session, project: project, tree: deadTree)
         }
         return true
     }
@@ -579,11 +644,9 @@ enum WorkspaceDockTarget: Equatable {
 /// drag & drop because the terminal's AppKit/Metal views intercept system
 /// drag routing, which made drops unreliable.
 final class WorkspaceDragState: ObservableObject {
-    enum Payload {
+    enum Payload: Equatable {
         case pane(UUID)
         case session(UUID)
-
-        var isPane: Bool { if case .pane = self { return true }; return false }
     }
 
     /// What's being dragged; nil when no drag is active.
@@ -610,72 +673,61 @@ final class WorkspaceDragState: ObservableObject {
 }
 
 /// Pure geometry: resolve dock targets and highlight rects for a point in
-/// the terminal area.
+/// the terminal area. One spatial layout pass per call.
 enum WorkspaceDockResolver {
-    static func target(
+    static func resolve(
         at point: CGPoint,
         size: CGSize,
         tree: SplitTree<Ghostty.SurfaceView>
-    ) -> WorkspaceDockTarget? {
+    ) -> (target: WorkspaceDockTarget?, highlight: CGRect?) {
         guard size.width > 0, size.height > 0,
               point.x >= 0, point.y >= 0, point.x <= size.width, point.y <= size.height
-        else { return nil }
+        else { return (nil, nil) }
 
         // Near a window edge: dock against the whole terminal area.
         let margin: CGFloat = 28
-        if point.x < margin { return .windowEdge(.left) }
-        if point.x > size.width - margin { return .windowEdge(.right) }
-        if point.y < margin { return .windowEdge(.up) }
-        if point.y > size.height - margin { return .windowEdge(.down) }
+        let edgeTarget: SplitTree<Ghostty.SurfaceView>.NewDirection?
+        if point.x < margin { edgeTarget = .left }
+        else if point.x > size.width - margin { edgeTarget = .right }
+        else if point.y < margin { edgeTarget = .up }
+        else if point.y > size.height - margin { edgeTarget = .down }
+        else { edgeTarget = nil }
+        if let edge = edgeTarget {
+            let rect: CGRect
+            switch edge {
+            case .left: rect = .init(x: 0, y: 0, width: size.width / 2, height: size.height)
+            case .right: rect = .init(x: size.width / 2, y: 0, width: size.width / 2, height: size.height)
+            case .up: rect = .init(x: 0, y: 0, width: size.width, height: size.height / 2)
+            case .down: rect = .init(x: 0, y: size.height / 2, width: size.width, height: size.height / 2)
+            }
+            return (.windowEdge(edge), rect)
+        }
 
-        // Otherwise target the pane under the cursor.
-        guard let root = tree.root else { return nil }
+        // Otherwise target the pane under the cursor. Single layout pass.
+        guard let root = tree.root else { return (nil, nil) }
         let slots = root.spatial(within: size).slots
         guard let slot = slots.first(where: { slot in
             if case .leaf = slot.node { return slot.bounds.contains(point) }
             return false
-        }), case .leaf(let view) = slot.node else { return nil }
+        }), case .leaf(let view) = slot.node else { return (nil, nil) }
 
-        let rx = (point.x - slot.bounds.minX) / slot.bounds.width
-        let ry = (point.y - slot.bounds.minY) / slot.bounds.height
+        let b = slot.bounds
+        let rx = (point.x - b.minX) / b.width
+        let ry = (point.y - b.minY) / b.height
         let candidates: [(SplitTree<Ghostty.SurfaceView>.NewDirection, CGFloat)] = [
             (.left, rx), (.right, 1 - rx), (.up, ry), (.down, 1 - ry),
         ]
         let best = candidates.min { $0.1 < $1.1 }!
-        return .pane(view.id, best.1 <= 0.33 ? best.0 : nil)
-    }
+        guard best.1 <= 0.33 else { return (.pane(view.id, nil), b) }
 
-    static func highlightRect(
-        for target: WorkspaceDockTarget?,
-        size: CGSize,
-        tree: SplitTree<Ghostty.SurfaceView>
-    ) -> CGRect? {
-        switch target {
-        case nil:
-            return nil
-        case .windowEdge(let edge):
-            switch edge {
-            case .left: return .init(x: 0, y: 0, width: size.width / 2, height: size.height)
-            case .right: return .init(x: size.width / 2, y: 0, width: size.width / 2, height: size.height)
-            case .up: return .init(x: 0, y: 0, width: size.width, height: size.height / 2)
-            case .down: return .init(x: 0, y: size.height / 2, width: size.width, height: size.height / 2)
-            }
-        case .pane(let id, let edge):
-            guard let root = tree.root else { return nil }
-            let slots = root.spatial(within: size).slots
-            guard let slot = slots.first(where: { slot in
-                if case .leaf(let view) = slot.node { return view.id == id }
-                return false
-            }) else { return nil }
-            let b = slot.bounds
-            switch edge {
-            case nil: return b
-            case .left: return .init(x: b.minX, y: b.minY, width: b.width / 2, height: b.height)
-            case .right: return .init(x: b.midX, y: b.minY, width: b.width / 2, height: b.height)
-            case .up: return .init(x: b.minX, y: b.minY, width: b.width, height: b.height / 2)
-            case .down: return .init(x: b.minX, y: b.midY, width: b.width, height: b.height / 2)
-            }
+        let rect: CGRect
+        switch best.0 {
+        case .left: rect = .init(x: b.minX, y: b.minY, width: b.width / 2, height: b.height)
+        case .right: rect = .init(x: b.midX, y: b.minY, width: b.width / 2, height: b.height)
+        case .up: rect = .init(x: b.minX, y: b.minY, width: b.width, height: b.height / 2)
+        case .down: rect = .init(x: b.minX, y: b.midY, width: b.width, height: b.height / 2)
         }
+        return (.pane(view.id, best.0), rect)
     }
 }
 
@@ -807,12 +859,15 @@ struct WorkspaceRootView: View {
     }
 }
 
-/// The terminal side of the window: terminal view + dock highlight + the
-/// floating drag chip + split buttons.
+/// The terminal side of the window: terminal view + drag overlay.
+///
+/// Deliberately does NOT observe the drag state: only the lightweight
+/// WorkspaceDragOverlay re-renders during a drag, so the terminal subtree
+/// isn't re-evaluated at pointer-event rate.
 struct WorkspaceTerminalArea: View {
     @ObservedObject var ghostty: Ghostty.App
     let controller: TerminalController
-    @ObservedObject var dragState: WorkspaceDragState
+    let dragState: WorkspaceDragState
 
     var body: some View {
         GeometryReader { geo in
@@ -820,30 +875,11 @@ struct WorkspaceTerminalArea: View {
                 TerminalView(
                     ghostty: ghostty,
                     viewModel: controller,
-                    delegate: controller
+                    delegate: controller,
+                    showsPaneHeaders: true
                 )
 
-                if dragState.payload != nil, let rect = dragState.highlight {
-                    WorkspaceDockHighlight(rect: rect)
-                }
-
-                // A small chip following the cursor during a drag.
-                if dragState.payload != nil {
-                    HStack(spacing: 5) {
-                        Image(systemName: "terminal")
-                            .font(.system(size: 10))
-                        Text(dragState.label)
-                            .font(.system(size: 11.5))
-                            .lineLimit(1)
-                    }
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(Color.accentColor.opacity(0.85)))
-                    .foregroundColor(.white)
-                    .position(x: dragState.location.x, y: dragState.location.y - 16)
-                    .allowsHitTesting(false)
-                }
-
+                WorkspaceDragOverlay(dragState: dragState)
             }
             .onAppear {
                 dragState.terminalFrame = geo.frame(in: .named(workspaceRootSpace))
@@ -853,6 +889,38 @@ struct WorkspaceTerminalArea: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// The dock highlight + cursor chip shown during a workspace drag. Isolated
+/// so pointer-rate state changes only invalidate this small view.
+struct WorkspaceDragOverlay: View {
+    @ObservedObject var dragState: WorkspaceDragState
+
+    var body: some View {
+        ZStack {
+            if dragState.payload != nil, let rect = dragState.highlight {
+                WorkspaceDockHighlight(rect: rect)
+            }
+
+            // A small chip following the cursor during a drag.
+            if dragState.payload != nil {
+                HStack(spacing: 5) {
+                    Image(systemName: "terminal")
+                        .font(.system(size: 10))
+                    Text(dragState.label)
+                        .font(.system(size: 11.5))
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.accentColor.opacity(0.85)))
+                .foregroundColor(.white)
+                .position(x: dragState.location.x, y: dragState.location.y - 16)
+                .allowsHitTesting(false)
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 
@@ -1147,6 +1215,12 @@ struct WorkspaceSessionRow: View {
                     controller?.workspaceDragEnded()
                 }
         )
+        .onDisappear {
+            // Row removed mid-drag: the gesture is cancelled without onEnded.
+            if controller?.workspaceDragState.payload == .session(session.id) {
+                controller?.workspaceDragState.reset()
+            }
+        }
         .contextMenu {
             Button("在访达中打开") {
                 NSWorkspace.shared.activateFileViewerSelecting(

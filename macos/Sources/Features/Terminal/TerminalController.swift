@@ -167,6 +167,13 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             window.surfaceIsZoomed = to.zoomed != nil
         }
 
+        // If a pane that's mid-drag disappeared from the tree, clear the
+        // drag state so the overlay doesn't linger and the next drag doesn't
+        // pick up a stale payload.
+        if case .pane(let dragID) = workspaceDragState.payload, to.find(id: dragID) == nil {
+            workspaceDragState.reset()
+        }
+
         // Keep the shown workspace session's stored tree in sync so splits
         // survive session switches.
         if let session = activeWorkspaceSession {
@@ -1043,6 +1050,22 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     }
 
     override func windowWillClose(_ notification: Notification) {
+        // Closing the window closes its conversation's terminals, matching
+        // the close-confirmation dialog ("the process will be killed"). The
+        // session row is kept so it can be relaunched later; the live tree is
+        // released here (the undo system may retain it until expiration,
+        // which matches upstream close-window semantics).
+        if let session = activeWorkspaceSession {
+            activeWorkspaceSession = nil
+            workspaceState.activeSessionID = nil
+            session.syncTitle()
+            // Allow a restored window (undo close / state restoration) to
+            // re-link to this session instead of duplicating it.
+            session.restoredSurfaceUUID = session.primarySurface?.id
+            session.tree = nil
+            ProjectManager.shared.save()
+        }
+
         super.windowWillClose(notification)
         self.relabelTabs()
 
