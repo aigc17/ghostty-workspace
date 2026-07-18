@@ -437,6 +437,52 @@ extension TerminalController {
         ProjectManager.shared.save()
     }
 
+    /// Gesture-driven drag in progress: update the drag state (chip position,
+    /// resolved target, highlight). `rootLocation` is in the workspace root
+    /// coordinate space.
+    func workspaceDragChanged(
+        payload: WorkspaceDragState.Payload,
+        label: String,
+        rootLocation: CGPoint
+    ) {
+        let state = workspaceDragState
+        if state.payload == nil {
+            state.payload = payload
+            state.label = label
+        }
+        let frame = state.terminalFrame
+        let local = CGPoint(x: rootLocation.x - frame.minX, y: rootLocation.y - frame.minY)
+        state.location = local
+        let target = WorkspaceDockResolver.target(at: local, size: frame.size, tree: surfaceTree)
+        state.target = target
+        state.highlight = WorkspaceDockResolver.highlightRect(
+            for: target, size: frame.size, tree: surfaceTree)
+    }
+
+    /// Gesture-driven drag finished: perform the dock and clear the state.
+    func workspaceDragEnded() {
+        let state = workspaceDragState
+        let payload = state.payload
+        let target = state.target
+        state.reset()
+
+        guard let payload, let target else { return }
+        switch payload {
+        case .pane(let uuid):
+            moveWorkspacePane(surfaceID: uuid, to: target)
+        case .session(let uuid):
+            guard let session = ProjectManager.shared.allSessions.first(where: { $0.id == uuid })
+            else { return }
+            switch target {
+            case .windowEdge, .pane(_, .some):
+                dockWorkspaceSession(session, target: target)
+            case .pane(_, nil):
+                // Center: just show that session.
+                activateWorkspaceSession(session)
+            }
+        }
+    }
+
     /// Move an existing pane (dragged by its grip) to a new dock target:
     /// another pane's edge (split there), another pane's center (swap the
     /// two panes), or a window edge (half the window).
@@ -520,13 +566,6 @@ extension TerminalController {
 
 // MARK: - Views
 
-/// The drag type used to drag sessions from the sidebar into the terminal
-/// area for Zed-style dock splitting. Own-process only.
-let workspaceSessionUTType = UTType(exportedAs: "com.qimu.ghostty-workspace.session")
-
-/// The drag type used to drag an existing pane (via its grip) to re-dock it.
-let workspacePaneUTType = UTType(exportedAs: "com.qimu.ghostty-workspace.pane")
-
 /// Where a drag over the terminal area would dock.
 enum WorkspaceDockTarget: Equatable {
     /// Dock against a window edge: takes half the whole terminal area.
@@ -535,21 +574,123 @@ enum WorkspaceDockTarget: Equatable {
     case pane(UUID, SplitTree<Ghostty.SurfaceView>.NewDirection?)
 }
 
-/// Build the item provider for workspace drags. Uses the plain
-/// `init(item:typeIdentifier:)` registration so the drag pasteboard always
-/// carries the type (per-closure registration with restricted visibility can
-/// yield an empty pasteboard and a drag that never starts).
-func workspaceDragItemProvider(type: UTType, uuid: UUID) -> NSItemProvider {
-    NSItemProvider(
-        item: uuid.uuidString.data(using: .utf8)! as NSData,
-        typeIdentifier: type.identifier)
+/// Live state of an in-progress workspace drag (pane header or sidebar
+/// session). We implement dragging with SwiftUI gestures instead of system
+/// drag & drop because the terminal's AppKit/Metal views intercept system
+/// drag routing, which made drops unreliable.
+final class WorkspaceDragState: ObservableObject {
+    enum Payload {
+        case pane(UUID)
+        case session(UUID)
+
+        var isPane: Bool { if case .pane = self { return true }; return false }
+    }
+
+    /// What's being dragged; nil when no drag is active.
+    @Published var payload: Payload? = nil
+    /// A short label shown on the floating drag chip.
+    @Published var label: String = ""
+    /// Cursor location in the terminal area's local coordinates.
+    @Published var location: CGPoint = .zero
+    /// Resolved dock target under the cursor.
+    @Published var target: WorkspaceDockTarget? = nil
+    /// Highlight rect in the terminal area's local coordinates.
+    @Published var highlight: CGRect? = nil
+
+    /// The terminal area's frame in the window root coordinate space,
+    /// kept up to date by the root view's geometry reader.
+    var terminalFrame: CGRect = .zero
+
+    func reset() {
+        payload = nil
+        label = ""
+        target = nil
+        highlight = nil
+    }
 }
+
+/// Pure geometry: resolve dock targets and highlight rects for a point in
+/// the terminal area.
+enum WorkspaceDockResolver {
+    static func target(
+        at point: CGPoint,
+        size: CGSize,
+        tree: SplitTree<Ghostty.SurfaceView>
+    ) -> WorkspaceDockTarget? {
+        guard size.width > 0, size.height > 0,
+              point.x >= 0, point.y >= 0, point.x <= size.width, point.y <= size.height
+        else { return nil }
+
+        // Near a window edge: dock against the whole terminal area.
+        let margin: CGFloat = 28
+        if point.x < margin { return .windowEdge(.left) }
+        if point.x > size.width - margin { return .windowEdge(.right) }
+        if point.y < margin { return .windowEdge(.up) }
+        if point.y > size.height - margin { return .windowEdge(.down) }
+
+        // Otherwise target the pane under the cursor.
+        guard let root = tree.root else { return nil }
+        let slots = root.spatial(within: size).slots
+        guard let slot = slots.first(where: { slot in
+            if case .leaf = slot.node { return slot.bounds.contains(point) }
+            return false
+        }), case .leaf(let view) = slot.node else { return nil }
+
+        let rx = (point.x - slot.bounds.minX) / slot.bounds.width
+        let ry = (point.y - slot.bounds.minY) / slot.bounds.height
+        let candidates: [(SplitTree<Ghostty.SurfaceView>.NewDirection, CGFloat)] = [
+            (.left, rx), (.right, 1 - rx), (.up, ry), (.down, 1 - ry),
+        ]
+        let best = candidates.min { $0.1 < $1.1 }!
+        return .pane(view.id, best.1 <= 0.33 ? best.0 : nil)
+    }
+
+    static func highlightRect(
+        for target: WorkspaceDockTarget?,
+        size: CGSize,
+        tree: SplitTree<Ghostty.SurfaceView>
+    ) -> CGRect? {
+        switch target {
+        case nil:
+            return nil
+        case .windowEdge(let edge):
+            switch edge {
+            case .left: return .init(x: 0, y: 0, width: size.width / 2, height: size.height)
+            case .right: return .init(x: size.width / 2, y: 0, width: size.width / 2, height: size.height)
+            case .up: return .init(x: 0, y: 0, width: size.width, height: size.height / 2)
+            case .down: return .init(x: 0, y: size.height / 2, width: size.width, height: size.height / 2)
+            }
+        case .pane(let id, let edge):
+            guard let root = tree.root else { return nil }
+            let slots = root.spatial(within: size).slots
+            guard let slot = slots.first(where: { slot in
+                if case .leaf(let view) = slot.node { return view.id == id }
+                return false
+            }) else { return nil }
+            let b = slot.bounds
+            switch edge {
+            case nil: return b
+            case .left: return .init(x: b.minX, y: b.minY, width: b.width / 2, height: b.height)
+            case .right: return .init(x: b.midX, y: b.minY, width: b.width / 2, height: b.height)
+            case .up: return .init(x: b.minX, y: b.minY, width: b.width, height: b.height / 2)
+            case .down: return .init(x: b.minX, y: b.midY, width: b.width, height: b.height / 2)
+            }
+        }
+    }
+}
+
+/// The named coordinate space covering the whole workspace root view.
+let workspaceRootSpace = "workspaceRoot"
 
 /// The tab-like header bar on top of each terminal pane. The whole bar is a
 /// drag handle for re-docking the pane; hovering reveals a close button.
 struct WorkspacePaneHeader: View {
     @ObservedObject var surface: Ghostty.SurfaceView
     @State private var hovered = false
+
+    private var controller: TerminalController? {
+        surface.window?.windowController as? TerminalController
+    }
 
     var body: some View {
         HStack(spacing: 6) {
@@ -583,13 +724,22 @@ struct WorkspacePaneHeader: View {
         .contentShape(Rectangle())
         .onHover { hovered = $0 }
         .help("拖动标签栏可把此终端停靠到其他分区")
-        .onDrag {
-            workspaceDragItemProvider(type: workspacePaneUTType, uuid: surface.id)
-        }
+        .gesture(
+            DragGesture(minimumDistance: 4, coordinateSpace: .named(workspaceRootSpace))
+                .onChanged { value in
+                    controller?.workspaceDragChanged(
+                        payload: .pane(surface.id),
+                        label: surface.title.isEmpty ? "终端" : surface.title,
+                        rootLocation: value.location)
+                }
+                .onEnded { _ in
+                    controller?.workspaceDragEnded()
+                }
+        )
     }
 
     private func closePane() {
-        guard let controller = surface.window?.windowController as? TerminalController else {
+        guard let controller else {
             (surface.window?.windowController as? BaseTerminalController)?.closeSurface(surface)
             return
         }
@@ -611,11 +761,6 @@ struct WorkspaceRootView: View {
     @ObservedObject var state: WorkspaceState
     @ObservedObject var manager: ProjectManager = .shared
 
-    /// Dock-drop state while dragging a session/pane over the terminal area.
-    @State private var dockTargeted = false
-    @State private var dockTarget: WorkspaceDockTarget? = nil
-    @State private var dockRect: CGRect? = nil
-
     var body: some View {
         HStack(spacing: 0) {
             if state.sidebarVisible {
@@ -630,55 +775,86 @@ struct WorkspaceRootView: View {
             Divider()
 
             if let controller {
-                GeometryReader { geo in
-                    ZStack {
-                        TerminalView(
-                            ghostty: ghostty,
-                            viewModel: controller,
-                            delegate: controller
-                        )
-
-                        if dockTargeted, let dockRect {
-                            WorkspaceDockHighlight(rect: dockRect)
-                        }
-
-                        // Floating split buttons, Zed-style (top-right).
-                        VStack {
-                            HStack {
-                                Spacer()
-                                HStack(spacing: 10) {
-                                    Button { controller.newWorkspaceSplitTerminal(direction: .right) } label: {
-                                        Image(systemName: "rectangle.split.2x1")
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help("向右新建终端")
-                                    Button { controller.newWorkspaceSplitTerminal(direction: .down) } label: {
-                                        Image(systemName: "rectangle.split.1x2")
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help("向下新建终端")
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.3)))
-                                .padding(8)
-                                .opacity(0.75)
-                            }
-                            Spacer()
-                        }
-                    }
-                    .onDrop(
-                        of: [workspaceSessionUTType, workspacePaneUTType],
-                        delegate: WorkspaceDockDropDelegate(
-                            size: geo.size,
-                            controller: controller,
-                            target: $dockTarget,
-                            rect: $dockRect,
-                            targeted: $dockTargeted))
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                WorkspaceTerminalArea(
+                    ghostty: ghostty,
+                    controller: controller,
+                    dragState: controller.workspaceDragState)
             }
         }
+        .coordinateSpace(name: workspaceRootSpace)
+    }
+}
+
+/// The terminal side of the window: terminal view + dock highlight + the
+/// floating drag chip + split buttons.
+struct WorkspaceTerminalArea: View {
+    @ObservedObject var ghostty: Ghostty.App
+    let controller: TerminalController
+    @ObservedObject var dragState: WorkspaceDragState
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                TerminalView(
+                    ghostty: ghostty,
+                    viewModel: controller,
+                    delegate: controller
+                )
+
+                if dragState.payload != nil, let rect = dragState.highlight {
+                    WorkspaceDockHighlight(rect: rect)
+                }
+
+                // A small chip following the cursor during a drag.
+                if dragState.payload != nil {
+                    HStack(spacing: 5) {
+                        Image(systemName: "terminal")
+                            .font(.system(size: 10))
+                        Text(dragState.label)
+                            .font(.system(size: 11.5))
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(Color.accentColor.opacity(0.85)))
+                    .foregroundColor(.white)
+                    .position(x: dragState.location.x, y: dragState.location.y - 16)
+                    .allowsHitTesting(false)
+                }
+
+                // Floating split buttons, Zed-style (top-right).
+                VStack {
+                    HStack {
+                        Spacer()
+                        HStack(spacing: 10) {
+                            Button { controller.newWorkspaceSplitTerminal(direction: .right) } label: {
+                                Image(systemName: "rectangle.split.2x1")
+                            }
+                            .buttonStyle(.plain)
+                            .help("向右新建终端")
+                            Button { controller.newWorkspaceSplitTerminal(direction: .down) } label: {
+                                Image(systemName: "rectangle.split.1x2")
+                            }
+                            .buttonStyle(.plain)
+                            .help("向下新建终端")
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.3)))
+                        .padding(8)
+                        .opacity(0.75)
+                    }
+                    Spacer()
+                }
+            }
+            .onAppear {
+                dragState.terminalFrame = geo.frame(in: .named(workspaceRootSpace))
+            }
+            .onChange(of: geo.frame(in: .named(workspaceRootSpace))) { newValue in
+                dragState.terminalFrame = newValue
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -697,150 +873,6 @@ struct WorkspaceDockHighlight: View {
     }
 }
 
-/// Handles session/pane drags over the terminal area. Zed-style targeting:
-/// near a window edge docks against the whole area; otherwise the pane under
-/// the cursor is the target, split by which edge of it the cursor is near
-/// (its center means "swap"/"activate").
-struct WorkspaceDockDropDelegate: DropDelegate {
-    let size: CGSize
-    weak var controller: TerminalController?
-    @Binding var target: WorkspaceDockTarget?
-    @Binding var rect: CGRect?
-    @Binding var targeted: Bool
-
-    func validateDrop(info: DropInfo) -> Bool {
-        info.hasItemsConforming(to: [workspaceSessionUTType, workspacePaneUTType])
-    }
-
-    func dropEntered(info: DropInfo) {
-        targeted = true
-        update(info)
-    }
-
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        update(info)
-        return DropProposal(operation: .move)
-    }
-
-    func dropExited(info: DropInfo) {
-        targeted = false
-        target = nil
-        rect = nil
-    }
-
-    private func update(_ info: DropInfo) {
-        let resolved = resolveTarget(at: info.location)
-        target = resolved
-        rect = highlightRect(for: resolved)
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        let finalTarget = target
-        targeted = false
-        target = nil
-        rect = nil
-
-        if let provider = info.itemProviders(for: [workspacePaneUTType]).first {
-            provider.loadDataRepresentation(forTypeIdentifier: workspacePaneUTType.identifier) { data, _ in
-                guard let uuid = Self.uuid(from: data) else { return }
-                DispatchQueue.main.async {
-                    guard let finalTarget else { return }
-                    controller?.moveWorkspacePane(surfaceID: uuid, to: finalTarget)
-                }
-            }
-            return true
-        }
-
-        guard let provider = info.itemProviders(for: [workspaceSessionUTType]).first else { return false }
-        provider.loadDataRepresentation(forTypeIdentifier: workspaceSessionUTType.identifier) { data, _ in
-            guard let uuid = Self.uuid(from: data) else { return }
-            DispatchQueue.main.async {
-                guard let controller,
-                      let session = ProjectManager.shared.allSessions.first(where: { $0.id == uuid })
-                else { return }
-                switch finalTarget {
-                case .windowEdge, .pane(_, .some):
-                    controller.dockWorkspaceSession(session, target: finalTarget!)
-                case .pane(_, nil), nil:
-                    // Center: just show that session.
-                    controller.activateWorkspaceSession(session)
-                }
-            }
-        }
-        return true
-    }
-
-    private static func uuid(from data: Data?) -> UUID? {
-        guard let data, let string = String(data: data, encoding: .utf8) else { return nil }
-        return UUID(uuidString: string)
-    }
-
-    /// Resolve where the cursor would dock.
-    private func resolveTarget(at point: CGPoint) -> WorkspaceDockTarget? {
-        guard size.width > 0, size.height > 0 else { return nil }
-
-        // Near a window edge: dock against the whole terminal area.
-        let margin: CGFloat = 28
-        if point.x < margin { return .windowEdge(.left) }
-        if point.x > size.width - margin { return .windowEdge(.right) }
-        if point.y < margin { return .windowEdge(.up) }
-        if point.y > size.height - margin { return .windowEdge(.down) }
-
-        // Otherwise target the pane under the cursor.
-        guard let leaf = leafSlot(at: point) else { return nil }
-        guard case .leaf(let view) = leaf.node else { return nil }
-        let rx = (point.x - leaf.bounds.minX) / leaf.bounds.width
-        let ry = (point.y - leaf.bounds.minY) / leaf.bounds.height
-        let candidates: [(SplitTree<Ghostty.SurfaceView>.NewDirection, CGFloat)] = [
-            (.left, rx), (.right, 1 - rx), (.up, ry), (.down, 1 - ry),
-        ]
-        let best = candidates.min { $0.1 < $1.1 }!
-        return .pane(view.id, best.1 <= 0.33 ? best.0 : nil)
-    }
-
-    private func highlightRect(for target: WorkspaceDockTarget?) -> CGRect? {
-        switch target {
-        case nil:
-            return nil
-        case .windowEdge(let edge):
-            switch edge {
-            case .left: return .init(x: 0, y: 0, width: size.width / 2, height: size.height)
-            case .right: return .init(x: size.width / 2, y: 0, width: size.width / 2, height: size.height)
-            case .up: return .init(x: 0, y: 0, width: size.width, height: size.height / 2)
-            case .down: return .init(x: 0, y: size.height / 2, width: size.width, height: size.height / 2)
-            }
-        case .pane(let id, let edge):
-            guard let slot = leafSlot(withID: id) else { return nil }
-            let b = slot.bounds
-            switch edge {
-            case nil: return b
-            case .left: return .init(x: b.minX, y: b.minY, width: b.width / 2, height: b.height)
-            case .right: return .init(x: b.midX, y: b.minY, width: b.width / 2, height: b.height)
-            case .up: return .init(x: b.minX, y: b.minY, width: b.width, height: b.height / 2)
-            case .down: return .init(x: b.minX, y: b.midY, width: b.width, height: b.height / 2)
-            }
-        }
-    }
-
-    private var spatialSlots: [SplitTree<Ghostty.SurfaceView>.Spatial.Slot] {
-        guard let root = controller?.surfaceTree.root else { return [] }
-        return root.spatial(within: size).slots
-    }
-
-    private func leafSlot(at point: CGPoint) -> SplitTree<Ghostty.SurfaceView>.Spatial.Slot? {
-        spatialSlots.first { slot in
-            if case .leaf = slot.node { return slot.bounds.contains(point) }
-            return false
-        }
-    }
-
-    private func leafSlot(withID id: UUID) -> SplitTree<Ghostty.SurfaceView>.Spatial.Slot? {
-        spatialSlots.first { slot in
-            if case .leaf(let view) = slot.node { return view.id == id }
-            return false
-        }
-    }
-}
 
 /// The project/session sidebar.
 struct WorkspaceSidebarView: View {
@@ -1061,10 +1093,19 @@ struct WorkspaceSessionRow: View {
         )
         .contentShape(Rectangle())
         .onTapGesture { controller?.activateWorkspaceSession(session) }
-        .onDrag {
+        .gesture(
             // Drag a session into the terminal area to dock it as a split.
-            workspaceDragItemProvider(type: workspaceSessionUTType, uuid: session.id)
-        }
+            DragGesture(minimumDistance: 4, coordinateSpace: .named(workspaceRootSpace))
+                .onChanged { value in
+                    controller?.workspaceDragChanged(
+                        payload: .session(session.id),
+                        label: session.title,
+                        rootLocation: value.location)
+                }
+                .onEnded { _ in
+                    controller?.workspaceDragEnded()
+                }
+        )
         .contextMenu {
             Button("在访达中打开") {
                 NSWorkspace.shared.activateFileViewerSelecting(

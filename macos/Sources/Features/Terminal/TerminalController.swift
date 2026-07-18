@@ -61,6 +61,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// Per-window sidebar UI state.
     let workspaceState = WorkspaceState()
 
+    /// Per-window state for gesture-driven pane/session dragging.
+    let workspaceDragState = WorkspaceDragState()
+
     /// The workspace session currently shown in this window, if any.
     var activeWorkspaceSession: WorkspaceSession? = nil
 
