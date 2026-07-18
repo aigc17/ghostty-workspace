@@ -1120,11 +1120,12 @@ struct WorkspaceProjectSection: View {
                     .foregroundColor(.secondary)
                     .rotationEffect(.degrees(project.expanded ? 90 : 0))
                     .frame(width: 10)
-                Image(systemName: "folder")
-                    .font(.system(size: 12))
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 12.5))
                     .foregroundColor(hovered ? .primary : .secondary)
                 Text(project.name)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.primary)
                     .lineLimit(1)
                     .help(project.path)
                 Spacer()
@@ -1220,9 +1221,10 @@ struct WorkspaceSessionRow: View {
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "terminal")
-                .font(.system(size: 10))
-                .foregroundColor(isActive || hovered ? .primary : .secondary)
+                .font(.system(size: 9.5))
+                .foregroundColor(isActive || hovered ? .primary : Color.secondary.opacity(0.75))
             WorkspaceSessionTitle(session: session)
+                .foregroundColor(isActive || hovered ? .primary : .secondary)
             Spacer()
             if hovered {
                 Button { controller?.closeWorkspaceSession(session) } label: {
@@ -1297,7 +1299,7 @@ struct WorkspaceSessionTitle: View {
             WorkspaceSurfaceTitle(surface: surface, fallback: session.title)
         } else {
             Text(session.title)
-                .font(.system(size: 12.5))
+                .font(.system(size: 12))
                 .lineLimit(1)
         }
     }
@@ -1309,7 +1311,7 @@ struct WorkspaceSurfaceTitle: View {
 
     var body: some View {
         Text(surface.title.isEmpty ? fallback : surface.title)
-            .font(.system(size: 12.5))
+            .font(.system(size: 12))
             .lineLimit(1)
     }
 }
