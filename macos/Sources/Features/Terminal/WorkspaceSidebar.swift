@@ -256,6 +256,118 @@ class ProjectManager: ObservableObject {
     }
 }
 
+// MARK: - Scrollback snapshots
+
+/// Saves a plain-text snapshot of a session's terminal contents when it is
+/// closed, so the record can still be inspected afterwards (read-only).
+enum WorkspaceSnapshots {
+    private static var dir: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("GhosttyWorkspace/snapshots")
+    }
+
+    private static func url(for session: WorkspaceSession) -> URL {
+        dir.appendingPathComponent("\(session.id.uuidString).txt")
+    }
+
+    /// Capture the current screen+scrollback text of every surface in the
+    /// session's live tree. Call before releasing the tree.
+    static func save(_ session: WorkspaceSession) {
+        guard let tree = session.tree else { return }
+        let parts = Array(tree)
+            .map { $0.cachedScreenContents.get() }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !parts.isEmpty else { return }
+        let header = "# \(session.title)\n# \(session.workingDirectory)\n\n"
+        let text = header + parts.joined(separator: "\n\n────────── 分屏 ──────────\n\n")
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try text.write(to: url(for: session), atomically: true, encoding: .utf8)
+        } catch {
+            Ghostty.logger.warning("workspace snapshot save failed: \(error)")
+        }
+    }
+
+    static func exists(for session: WorkspaceSession) -> Bool {
+        FileManager.default.fileExists(atPath: url(for: session).path)
+    }
+
+    static func open(for session: WorkspaceSession) {
+        NSWorkspace.shared.open(url(for: session))
+    }
+
+    static func remove(for session: WorkspaceSession) {
+        try? FileManager.default.removeItem(at: url(for: session))
+    }
+}
+
+// MARK: - Claude Code integration
+
+/// One-click setup of the Claude Code hooks that power the sidebar's
+/// "AI 回复中" spinner: hooks write OSC 9;4 progress sequences to the tty
+/// on prompt submit / stop, which Ghostty parses natively.
+enum WorkspaceClaudeIntegration {
+    private static let events = ["UserPromptSubmit", "Stop", "SessionEnd"]
+
+    private static func command(for event: String) -> String {
+        let state = event == "UserPromptSubmit" ? "3" : "0"
+        return "{ printf '\\033]9;4;\(state);0\\033\\\\' > /dev/tty; } 2>/dev/null || true"
+    }
+
+    private static var settingsURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/settings.json")
+    }
+
+    /// True when every event already carries one of our progress hooks.
+    static func isConfigured() -> Bool {
+        guard let data = try? Data(contentsOf: settingsURL),
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let hooks = root["hooks"] as? [String: Any] else { return false }
+        return events.allSatisfy { event in
+            ((hooks[event] as? [[String: Any]]) ?? []).contains { entry in
+                ((entry["hooks"] as? [[String: Any]]) ?? []).contains {
+                    ($0["command"] as? String)?.contains("]9;4;") ?? false
+                }
+            }
+        }
+    }
+
+    /// Merge our hooks into ~/.claude/settings.json, preserving everything
+    /// else in the file. Idempotent.
+    static func configure() throws {
+        let url = settingsURL
+        var root: [String: Any] = [:]
+        if let data = try? Data(contentsOf: url),
+           let parsed = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            root = parsed
+        }
+
+        var hooks = root["hooks"] as? [String: Any] ?? [:]
+        for event in events {
+            var entries = hooks[event] as? [[String: Any]] ?? []
+            let already = entries.contains { entry in
+                ((entry["hooks"] as? [[String: Any]]) ?? []).contains {
+                    ($0["command"] as? String)?.contains("]9;4;") ?? false
+                }
+            }
+            guard !already else { continue }
+            entries.append(["hooks": [["type": "command", "command": command(for: event)]]])
+            hooks[event] = entries
+        }
+        root["hooks"] = hooks
+
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        let data = try JSONSerialization.data(
+            withJSONObject: root,
+            options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: url, options: .atomic)
+    }
+}
+
 // MARK: - TerminalController workspace actions
 
 extension TerminalController {
@@ -283,8 +395,10 @@ extension TerminalController {
     }
 
     /// Show a session in this window, keeping the previously shown session
-    /// alive in the background.
-    func activateWorkspaceSession(_ session: WorkspaceSession) {
+    /// alive in the background. `initialInput` is typed into a freshly
+    /// created shell (e.g. "claude --continue\n" to resume an AI conversation);
+    /// ignored when the session already has a live tree.
+    func activateWorkspaceSession(_ session: WorkspaceSession, initialInput: String? = nil) {
         if activeWorkspaceSession === session { return }
 
         // If the session is already shown in another window, focus that window.
@@ -310,6 +424,7 @@ extension TerminalController {
             guard let app = ghostty.app else { return }
             var config = Ghostty.SurfaceConfiguration()
             config.workingDirectory = session.workingDirectory
+            config.initialInput = initialInput
             tree = .init(view: Ghostty.SurfaceView(app, baseConfig: config))
             session.tree = tree
         }
@@ -388,9 +503,14 @@ extension TerminalController {
                 // The empty-tree path in surfaceTreeDidChange removes the
                 // session and activates the next one (or closes the window).
                 owner.surfaceTree = .init()
-            } else {
+            } else if session.tree != nil {
+                WorkspaceSnapshots.save(session)
                 self.registerWorkspaceSessionUndo(session)
                 session.tree = nil
+                manager.removeSession(session)
+            } else {
+                // Pure record row: remove it and its snapshot.
+                WorkspaceSnapshots.remove(for: session)
                 manager.removeSession(session)
             }
         }
@@ -411,6 +531,45 @@ extension TerminalController {
             session.tree = nil
         }
         manager.removeProject(project)
+    }
+
+    /// Simple info alert sheet.
+    func showWorkspaceInfoAlert(_ title: String, _ message: String) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "好")
+        alert.beginSheetModal(for: window)
+    }
+
+    /// First-launch offer to enable the Claude Code AI status hooks (开箱即用).
+    /// Asked once; the sidebar wand button can configure it any time later.
+    func offerClaudeIntegrationIfNeeded() {
+        let promptedKey = "WorkspaceClaudeHooksPrompted"
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: promptedKey) else { return }
+        guard !WorkspaceClaudeIntegration.isConfigured() else {
+            defaults.set(true, forKey: promptedKey)
+            return
+        }
+        defaults.set(true, forKey: promptedKey)
+
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "启用 AI 状态提示?"
+        alert.informativeText = "为 Claude Code 配置 hooks 后,AI 回复过程中侧边栏会显示加载动画,完成后有绿点提醒。只会向 ~/.claude/settings.json 合并三条无副作用的提示命令,随时可在该文件中删除。"
+        alert.addButton(withTitle: "启用")
+        alert.addButton(withTitle: "以后再说")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            do {
+                try WorkspaceClaudeIntegration.configure()
+            } catch {
+                Ghostty.logger.warning("claude hooks configure failed: \(error)")
+                self?.showWorkspaceInfoAlert("配置失败", "无法写入 ~/.claude/settings.json:\(error.localizedDescription)")
+            }
+        }
     }
 
     /// Show a rename sheet with a text field; calls completion with the
@@ -658,6 +817,7 @@ extension TerminalController {
         // session.tree still holds the pre-close tree (kept in sync while the
         // session was shown); hold onto it so Cmd+Z can restore the whole
         // conversation with scrollback and processes.
+        WorkspaceSnapshots.save(session)
         let deadTree = session.tree
         session.tree = nil
         manager.removeSession(session)
@@ -1009,6 +1169,29 @@ struct WorkspaceSidebarView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.secondary)
                 Spacer()
+                Button {
+                    guard let controller else { return }
+                    if WorkspaceClaudeIntegration.isConfigured() {
+                        controller.showWorkspaceInfoAlert(
+                            "已配置",
+                            "Claude Code 状态提示已启用:AI 回复中显示加载动画,完成后绿点提醒。")
+                        return
+                    }
+                    do {
+                        try WorkspaceClaudeIntegration.configure()
+                        controller.showWorkspaceInfoAlert(
+                            "配置完成",
+                            "已写入 ~/.claude/settings.json。新开的 Claude Code 会话即可生效(已在运行的会话输入 /hooks 重载一次)。")
+                    } catch {
+                        controller.showWorkspaceInfoAlert(
+                            "配置失败",
+                            "无法写入 ~/.claude/settings.json:\(error.localizedDescription)")
+                    }
+                } label: {
+                    Image(systemName: "wand.and.stars")
+                }
+                .buttonStyle(.plain)
+                .help("一键配置 Claude Code 状态提示")
                 Button { controller?.promptNewWorkspaceProject() } label: {
                     Image(systemName: "folder.badge.plus")
                 }
@@ -1292,6 +1475,17 @@ struct WorkspaceSessionRow: View {
             }
         }
         .contextMenu {
+            if session.tree == nil {
+                Button("恢复 AI 对话(claude --continue)") {
+                    controller?.activateWorkspaceSession(session, initialInput: "claude --continue\n")
+                }
+                if WorkspaceSnapshots.exists(for: session) {
+                    Button("查看关闭前的记录") {
+                        WorkspaceSnapshots.open(for: session)
+                    }
+                }
+                Divider()
+            }
             Button("重命名对话…") {
                 controller?.promptWorkspaceRename(title: "重命名对话", current: session.title) { name in
                     session.title = name

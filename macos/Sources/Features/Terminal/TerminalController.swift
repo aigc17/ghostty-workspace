@@ -996,6 +996,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Register this window's initial surface in the sidebar.
         adoptInitialWorkspaceSession()
 
+        // 开箱即用:首次启动时引导启用 Claude Code 状态提示。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.offerClaudeIntegrationIfNeeded()
+        }
+
         // In various situations, macOS automatically tabs new windows. Ghostty handles
         // its own tabbing so we DONT want this behavior. This detects this scenario and undoes
         // it.
@@ -1059,6 +1064,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             activeWorkspaceSession = nil
             workspaceState.activeSessionID = nil
             session.syncTitle()
+            WorkspaceSnapshots.save(session)
             // Allow a restored window (undo close / state restoration) to
             // re-link to this session instead of duplicating it.
             session.restoredSurfaceUUID = session.primarySurface?.id
