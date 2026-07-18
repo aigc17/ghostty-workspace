@@ -1183,11 +1183,13 @@ struct WorkspaceSessionRow: View {
                 .buttonStyle(.plain)
                 .help("关闭对话")
                 .transition(.opacity)
-            } else if session.tree != nil {
+            } else if session.tree != nil && !isActive {
+                // 绿点只标记「后台仍在运行」的会话;当前显示中的会话由
+                // 选中高亮表达,不再重复提示。
                 Circle()
                     .fill(Color.green.opacity(0.8))
                     .frame(width: 6, height: 6)
-                    .help("会话存活中")
+                    .help("后台运行中")
             }
         }
         .padding(.vertical, 4)
