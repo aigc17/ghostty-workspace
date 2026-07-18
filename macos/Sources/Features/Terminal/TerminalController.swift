@@ -1103,6 +1103,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         super.windowDidBecomeKey(notification)
         self.relabelTabs()
         self.fixTabBar()
+
+        // Viewing the shown session counts as reading its notifications.
+        activeWorkspaceSession?.hasUnread = false
     }
 
     override func windowDidMove(_ notification: Notification) {

@@ -1169,6 +1169,11 @@ extension Ghostty {
                 guard let title = String(cString: n.title!, encoding: .utf8) else { return }
                 guard let body = String(cString: n.body!, encoding: .utf8) else { return }
 
+                // 工作区:给所属会话点亮「未读」提示点。
+                DispatchQueue.main.async {
+                    ProjectManager.shared.markUnread(surfaceContaining: surfaceView)
+                }
+
                 let center = UNUserNotificationCenter.current()
                 center.requestAuthorization(options: [.alert, .sound]) { _, error in
                     if let error = error {

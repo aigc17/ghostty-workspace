@@ -32,6 +32,10 @@ class WorkspaceSession: ObservableObject, Identifiable {
     /// following the live terminal title.
     var userRenamed: Bool = false
 
+    /// True when a terminal in this session posted a desktop notification
+    /// (e.g. an AI CLI finished) that the user hasn't viewed yet.
+    @Published var hasUnread: Bool = false
+
     var primarySurface: Ghostty.SurfaceView? {
         guard let tree else { return nil }
         return Array(tree).first
@@ -106,6 +110,22 @@ class ProjectManager: ObservableObject {
 
     func project(containing session: WorkspaceSession) -> WorkspaceProject? {
         projects.first { $0.sessions.contains { $0 === session } }
+    }
+
+    /// A terminal posted a desktop notification: flag its session as unread
+    /// unless the user is looking at it right now.
+    func markUnread(surfaceContaining view: Ghostty.SurfaceView) {
+        guard let session = allSessions.first(where: { session in
+            guard let tree = session.tree else { return false }
+            return tree.contains { $0 === view }
+        }) else { return }
+
+        // Being viewed in the key window: the user already sees the result.
+        if let owner = TerminalController.all.first(where: { $0.activeWorkspaceSession === session }),
+           owner.window?.isKeyWindow ?? false {
+            return
+        }
+        session.hasUnread = true
     }
 
     /// Find (or create) the project for a directory path.
@@ -300,6 +320,7 @@ extension TerminalController {
 
         activeWorkspaceSession = session
         workspaceState.activeSessionID = session.id
+        session.hasUnread = false
         surfaceTree = tree
 
         if let view = Array(tree).first {
@@ -1235,6 +1256,12 @@ struct WorkspaceSessionRow: View {
                 .buttonStyle(.plain)
                 .help("关闭对话")
                 .transition(.opacity)
+            } else if session.hasUnread {
+                // 该会话的终端发过桌面通知(如 AI 完成)且尚未查看。
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 7, height: 7)
+                    .help("有新消息")
             }
         }
         .padding(.vertical, 4)
