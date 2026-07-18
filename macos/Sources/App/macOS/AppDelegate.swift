@@ -873,8 +873,15 @@ class AppDelegate: NSObject,
         
         switch (config.macosIcon) {
         case .official:
-            self.appIcon = nil
-            break
+            // Our fork ships its own AppIcon.icns; load it explicitly so the
+            // in-process icon (Dock tile, alert badges) matches the bundle
+            // icon instead of falling back to the generic placeholder.
+            if let path = Bundle.main.path(forResource: "AppIcon", ofType: "icns"),
+               let icon = NSImage(contentsOfFile: path) {
+                self.appIcon = icon
+            } else {
+                self.appIcon = nil
+            }
 
         case .blueprint:
             self.appIcon = NSImage(named: "BlueprintImage")!
