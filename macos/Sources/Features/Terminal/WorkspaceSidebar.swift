@@ -1258,8 +1258,9 @@ struct WorkspaceSessionRow: View {
                 .transition(.opacity)
             } else if session.hasUnread {
                 // 该会话的终端发过桌面通知(如 AI 完成)且尚未查看。
+                // 绿点 = 有新消息(用户约定的交互认知)。
                 Circle()
-                    .fill(Color.accentColor)
+                    .fill(Color.green)
                     .frame(width: 7, height: 7)
                     .help("有新消息")
             }
