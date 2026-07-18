@@ -327,43 +327,42 @@ extension TerminalController {
         }
     }
 
-    /// Close a session: kills its processes. If it's shown in a window, that
-    /// window switches to the next session (or closes if none remain).
+    /// Close a session from the sidebar. Always asks for confirmation:
+    /// closing destroys a conversation, so an accidental click should never
+    /// silently kill it.
     func closeWorkspaceSession(_ session: WorkspaceSession) {
         let manager = ProjectManager.shared
-        guard let owner = TerminalController.all.first(where: {
+        let owner = TerminalController.all.first(where: {
             $0.activeWorkspaceSession === session
-        }) else {
-            // Hidden session: same confirmation as every other close path,
-            // and undoable like closing a shown terminal.
-            let destroy = { [weak self] in
-                self?.registerWorkspaceSessionUndo(session)
+        })
+
+        let running: Bool
+        if let owner {
+            running = owner.surfaceTree.contains(where: { $0.needsConfirmQuit })
+        } else {
+            running = session.tree?.contains(where: { $0.needsConfirmQuit }) ?? false
+        }
+        let alive = owner != nil || session.tree != nil
+        let info: String
+        if running {
+            info = "该对话仍有正在运行的进程,关闭后进程将被终止。"
+        } else if alive {
+            info = "对话将被关闭并从列表中移除(短时间内可用 ⌘Z 撤销恢复)。"
+        } else {
+            info = "该对话记录将从列表中移除。"
+        }
+
+        confirmClose(messageText: "关闭对话?", informativeText: info) { [weak self] in
+            guard let self else { return }
+            if let owner {
+                // The empty-tree path in surfaceTreeDidChange removes the
+                // session and activates the next one (or closes the window).
+                owner.surfaceTree = .init()
+            } else {
+                self.registerWorkspaceSessionUndo(session)
                 session.tree = nil
                 manager.removeSession(session)
             }
-            if session.tree?.contains(where: { $0.needsConfirmQuit }) ?? false {
-                confirmClose(
-                    messageText: "关闭对话?",
-                    informativeText: "该对话仍有正在运行的进程,关闭后进程将被终止。"
-                ) { destroy() }
-            } else {
-                destroy()
-            }
-            return
-        }
-
-        let doClose = {
-            // The empty-tree path in surfaceTreeDidChange removes the session
-            // and activates the next one (or closes the window).
-            owner.surfaceTree = .init()
-        }
-        if owner.surfaceTree.contains(where: { $0.needsConfirmQuit }) {
-            owner.confirmClose(
-                messageText: "关闭对话?",
-                informativeText: "该对话仍有正在运行的进程,关闭后进程将被终止。"
-            ) { doClose() }
-        } else {
-            doClose()
         }
     }
 
