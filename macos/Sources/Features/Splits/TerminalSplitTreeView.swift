@@ -34,6 +34,10 @@ struct TerminalSplitSubtreeView: View {
                 isSplit: !isRoot)
                 .accessibilityElement(children: .contain)
                 .accessibilityLabel("Terminal pane")
+                // Zed-style: splits get a drag grip to re-dock the pane elsewhere.
+                .overlay(
+                    isRoot ? nil : WorkspacePaneDragHandle(surface: leafView),
+                    alignment: .top)
 
         case .split(let split):
             let splitViewDirection: SplitViewDirection = switch (split.direction) {

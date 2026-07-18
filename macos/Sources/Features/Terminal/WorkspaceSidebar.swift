@@ -360,14 +360,44 @@ extension TerminalController {
         newSplit(at: target, direction: direction, baseConfig: config)
     }
 
-    /// Dock a dragged session onto an edge of this window's terminal area:
-    /// the session's terminals merge into the current layout as a split
-    /// taking half the window (Zed-style), and the dragged session entry
-    /// disappears from the sidebar.
-    func dockWorkspaceSession(
-        _ session: WorkspaceSession,
-        edge: SplitTree<Ghostty.SurfaceView>.NewDirection
-    ) {
+    /// Build the split node that docks `incoming` against `existing` on `edge`.
+    static func workspaceSplitNode(
+        edge: SplitTree<Ghostty.SurfaceView>.NewDirection,
+        existing: SplitTree<Ghostty.SurfaceView>.Node,
+        incoming: SplitTree<Ghostty.SurfaceView>.Node
+    ) -> SplitTree<Ghostty.SurfaceView>.Node {
+        switch edge {
+        case .left: return .split(.init(direction: .horizontal, ratio: 0.5, left: incoming, right: existing))
+        case .right: return .split(.init(direction: .horizontal, ratio: 0.5, left: existing, right: incoming))
+        case .up: return .split(.init(direction: .vertical, ratio: 0.5, left: incoming, right: existing))
+        case .down: return .split(.init(direction: .vertical, ratio: 0.5, left: existing, right: incoming))
+        }
+    }
+
+    /// Insert `merged` into `tree` at the given dock target. Returns nil if
+    /// the target can't be resolved.
+    private func workspaceInserting(
+        _ merged: SplitTree<Ghostty.SurfaceView>.Node,
+        into tree: SplitTree<Ghostty.SurfaceView>,
+        at target: WorkspaceDockTarget
+    ) -> SplitTree<Ghostty.SurfaceView>? {
+        switch target {
+        case .windowEdge(let edge):
+            guard let root = tree.root else { return .init(root: merged, zoomed: nil) }
+            return .init(root: Self.workspaceSplitNode(edge: edge, existing: root, incoming: merged), zoomed: nil)
+        case .pane(let id, let edge):
+            guard let targetNode = tree.find(id: id) else { return nil }
+            let edge = edge ?? .right
+            return try? tree.replace(
+                node: targetNode,
+                with: Self.workspaceSplitNode(edge: edge, existing: targetNode, incoming: merged))
+        }
+    }
+
+    /// Dock a dragged sidebar session into this window's layout (Zed-style):
+    /// its terminals merge in as a split and the session entry disappears
+    /// from the sidebar.
+    func dockWorkspaceSession(_ session: WorkspaceSession, target: WorkspaceDockTarget) {
         guard activeWorkspaceSession != nil else {
             activateWorkspaceSession(session)
             return
@@ -393,32 +423,75 @@ extension TerminalController {
             merged = .leaf(view: Ghostty.SurfaceView(app, baseConfig: config))
         }
 
+        guard let newTree = workspaceInserting(merged, into: surfaceTree, at: target) else { return }
+
         // The dragged session's terminals now live in this session's layout.
         session.tree = nil
         ProjectManager.shared.removeSession(session)
         undoManager?.removeAllActions(withTarget: self)
 
-        guard let root = surfaceTree.root else {
-            surfaceTree = .init(root: merged, zoomed: nil)
-            return
-        }
-        let newRoot: SplitTree<Ghostty.SurfaceView>.Node
-        switch edge {
-        case .left:
-            newRoot = .split(.init(direction: .horizontal, ratio: 0.5, left: merged, right: root))
-        case .right:
-            newRoot = .split(.init(direction: .horizontal, ratio: 0.5, left: root, right: merged))
-        case .up:
-            newRoot = .split(.init(direction: .vertical, ratio: 0.5, left: merged, right: root))
-        case .down:
-            newRoot = .split(.init(direction: .vertical, ratio: 0.5, left: root, right: merged))
-        }
-        surfaceTree = .init(root: newRoot, zoomed: nil)
-
+        surfaceTree = newTree
         let focusView = merged.leftmostLeaf()
         focusedSurface = focusView
         Ghostty.moveFocus(to: focusView)
         ProjectManager.shared.save()
+    }
+
+    /// Move an existing pane (dragged by its grip) to a new dock target:
+    /// another pane's edge (split there), another pane's center (swap the
+    /// two panes), or a window edge (half the window).
+    func moveWorkspacePane(surfaceID: UUID, to target: WorkspaceDockTarget) {
+        guard let node = surfaceTree.find(id: surfaceID),
+              case .leaf(let view) = node else { return }
+
+        switch target {
+        case .pane(let targetID, nil):
+            // Center of another pane: swap the two panes in place.
+            guard targetID != surfaceID,
+                  let targetNode = surfaceTree.find(id: targetID),
+                  case .leaf(let targetView) = targetNode,
+                  let root = surfaceTree.root else { return }
+            surfaceTree = .init(
+                root: Self.workspaceSwappingLeaves(root, view, targetView),
+                zoomed: nil)
+
+        case .pane(let targetID, .some):
+            guard targetID != surfaceID else { return }
+            let removed = surfaceTree.remove(node)
+            guard let newTree = workspaceInserting(.leaf(view: view), into: removed, at: target) else { return }
+            surfaceTree = newTree
+
+        case .windowEdge:
+            let removed = surfaceTree.remove(node)
+            // Dragging the only pane to a window edge is a no-op.
+            guard removed.root != nil else { return }
+            guard let newTree = workspaceInserting(.leaf(view: view), into: removed, at: target) else { return }
+            surfaceTree = newTree
+        }
+
+        undoManager?.removeAllActions(withTarget: self)
+        focusedSurface = view
+        Ghostty.moveFocus(to: view)
+    }
+
+    /// Rebuild the node tree with two leaf views swapped.
+    private static func workspaceSwappingLeaves(
+        _ node: SplitTree<Ghostty.SurfaceView>.Node,
+        _ a: Ghostty.SurfaceView,
+        _ b: Ghostty.SurfaceView
+    ) -> SplitTree<Ghostty.SurfaceView>.Node {
+        switch node {
+        case .leaf(let view):
+            if view === a { return .leaf(view: b) }
+            if view === b { return .leaf(view: a) }
+            return node
+        case .split(let split):
+            return .split(.init(
+                direction: split.direction,
+                ratio: split.ratio,
+                left: workspaceSwappingLeaves(split.left, a, b),
+                right: workspaceSwappingLeaves(split.right, a, b)))
+        }
     }
 
     /// Handle the shown session's tree becoming empty (last surface closed).
@@ -451,6 +524,47 @@ extension TerminalController {
 /// area for Zed-style dock splitting. Own-process only.
 let workspaceSessionUTType = UTType(exportedAs: "com.qimu.ghostty-workspace.session")
 
+/// The drag type used to drag an existing pane (via its grip) to re-dock it.
+let workspacePaneUTType = UTType(exportedAs: "com.qimu.ghostty-workspace.pane")
+
+/// Where a drag over the terminal area would dock.
+enum WorkspaceDockTarget: Equatable {
+    /// Dock against a window edge: takes half the whole terminal area.
+    case windowEdge(SplitTree<Ghostty.SurfaceView>.NewDirection)
+    /// Dock against a specific pane (by surface UUID). nil edge = pane center.
+    case pane(UUID, SplitTree<Ghostty.SurfaceView>.NewDirection?)
+}
+
+/// The drag grip shown at the top of each split pane.
+struct WorkspacePaneDragHandle: View {
+    let surface: Ghostty.SurfaceView
+    @State private var hovered = false
+
+    var body: some View {
+        Image(systemName: "line.3.horizontal")
+            .font(.system(size: 9, weight: .bold))
+            .foregroundColor(.white.opacity(hovered ? 0.95 : 0.4))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(Color.black.opacity(hovered ? 0.55 : 0.22)))
+            .padding(.top, 3)
+            .onHover { hovered = $0 }
+            .help("拖动此分区到其他位置")
+            .onDrag {
+                let provider = NSItemProvider()
+                let uuid = surface.id.uuidString
+                provider.registerDataRepresentation(
+                    forTypeIdentifier: workspacePaneUTType.identifier,
+                    visibility: .ownProcess
+                ) { completion in
+                    completion(uuid.data(using: .utf8), nil)
+                    return nil
+                }
+                return provider
+            }
+    }
+}
+
 /// Root content view for a terminal window: sidebar + terminal.
 struct WorkspaceRootView: View {
     @ObservedObject var ghostty: Ghostty.App
@@ -458,9 +572,10 @@ struct WorkspaceRootView: View {
     @ObservedObject var state: WorkspaceState
     @ObservedObject var manager: ProjectManager = .shared
 
-    /// Dock-drop state while dragging a session over the terminal area.
+    /// Dock-drop state while dragging a session/pane over the terminal area.
     @State private var dockTargeted = false
-    @State private var dockEdge: SplitTree<Ghostty.SurfaceView>.NewDirection? = nil
+    @State private var dockTarget: WorkspaceDockTarget? = nil
+    @State private var dockRect: CGRect? = nil
 
     var body: some View {
         HStack(spacing: 0) {
@@ -484,8 +599,8 @@ struct WorkspaceRootView: View {
                             delegate: controller
                         )
 
-                        if dockTargeted {
-                            WorkspaceDockHighlight(edge: dockEdge, size: geo.size)
+                        if dockTargeted, let dockRect {
+                            WorkspaceDockHighlight(rect: dockRect)
                         }
 
                         // Floating split buttons, Zed-style (top-right).
@@ -514,11 +629,12 @@ struct WorkspaceRootView: View {
                         }
                     }
                     .onDrop(
-                        of: [workspaceSessionUTType],
+                        of: [workspaceSessionUTType, workspacePaneUTType],
                         delegate: WorkspaceDockDropDelegate(
                             size: geo.size,
                             controller: controller,
-                            edge: $dockEdge,
+                            target: $dockTarget,
+                            rect: $dockRect,
                             targeted: $dockTargeted))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -527,22 +643,12 @@ struct WorkspaceRootView: View {
     }
 }
 
-/// Highlights the half of the terminal area a dragged session would dock into.
+/// Highlights the region a dragged session/pane would dock into.
 struct WorkspaceDockHighlight: View {
-    let edge: SplitTree<Ghostty.SurfaceView>.NewDirection?
-    let size: CGSize
+    let rect: CGRect
 
     var body: some View {
-        let rect: CGRect = {
-            switch edge {
-            case .left: return .init(x: 0, y: 0, width: size.width / 2, height: size.height)
-            case .right: return .init(x: size.width / 2, y: 0, width: size.width / 2, height: size.height)
-            case .up: return .init(x: 0, y: 0, width: size.width, height: size.height / 2)
-            case .down: return .init(x: 0, y: size.height / 2, width: size.width, height: size.height / 2)
-            case nil: return .init(origin: .zero, size: size)
-            }
-        }()
-        return Rectangle()
+        Rectangle()
             .fill(Color.accentColor.opacity(0.16))
             .overlay(Rectangle().strokeBorder(Color.accentColor.opacity(0.8), lineWidth: 2))
             .frame(width: rect.width, height: rect.height)
@@ -552,51 +658,72 @@ struct WorkspaceDockHighlight: View {
     }
 }
 
-/// Handles session drags over the terminal area: tracks which edge the cursor
-/// is near and performs the dock split on drop.
+/// Handles session/pane drags over the terminal area. Zed-style targeting:
+/// near a window edge docks against the whole area; otherwise the pane under
+/// the cursor is the target, split by which edge of it the cursor is near
+/// (its center means "swap"/"activate").
 struct WorkspaceDockDropDelegate: DropDelegate {
     let size: CGSize
     weak var controller: TerminalController?
-    @Binding var edge: SplitTree<Ghostty.SurfaceView>.NewDirection?
+    @Binding var target: WorkspaceDockTarget?
+    @Binding var rect: CGRect?
     @Binding var targeted: Bool
 
     func validateDrop(info: DropInfo) -> Bool {
-        info.hasItemsConforming(to: [workspaceSessionUTType])
+        info.hasItemsConforming(to: [workspaceSessionUTType, workspacePaneUTType])
     }
 
     func dropEntered(info: DropInfo) {
         targeted = true
-        edge = Self.dockEdge(at: info.location, in: size)
+        update(info)
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        edge = Self.dockEdge(at: info.location, in: size)
+        update(info)
         return DropProposal(operation: .move)
     }
 
     func dropExited(info: DropInfo) {
         targeted = false
-        edge = nil
+        target = nil
+        rect = nil
+    }
+
+    private func update(_ info: DropInfo) {
+        let resolved = resolveTarget(at: info.location)
+        target = resolved
+        rect = highlightRect(for: resolved)
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        let finalEdge = edge
+        let finalTarget = target
         targeted = false
-        edge = nil
+        target = nil
+        rect = nil
+
+        if let provider = info.itemProviders(for: [workspacePaneUTType]).first {
+            provider.loadDataRepresentation(forTypeIdentifier: workspacePaneUTType.identifier) { data, _ in
+                guard let uuid = Self.uuid(from: data) else { return }
+                DispatchQueue.main.async {
+                    guard let finalTarget else { return }
+                    controller?.moveWorkspacePane(surfaceID: uuid, to: finalTarget)
+                }
+            }
+            return true
+        }
 
         guard let provider = info.itemProviders(for: [workspaceSessionUTType]).first else { return false }
         provider.loadDataRepresentation(forTypeIdentifier: workspaceSessionUTType.identifier) { data, _ in
-            guard let data,
-                  let string = String(data: data, encoding: .utf8),
-                  let uuid = UUID(uuidString: string) else { return }
+            guard let uuid = Self.uuid(from: data) else { return }
             DispatchQueue.main.async {
                 guard let controller,
                       let session = ProjectManager.shared.allSessions.first(where: { $0.id == uuid })
                 else { return }
-                if let finalEdge {
-                    controller.dockWorkspaceSession(session, edge: finalEdge)
-                } else {
-                    // Dropped in the center: just show that session.
+                switch finalTarget {
+                case .windowEdge, .pane(_, .some):
+                    controller.dockWorkspaceSession(session, target: finalTarget!)
+                case .pane(_, nil), nil:
+                    // Center: just show that session.
                     controller.activateWorkspaceSession(session)
                 }
             }
@@ -604,19 +731,75 @@ struct WorkspaceDockDropDelegate: DropDelegate {
         return true
     }
 
-    /// Which edge (if any) the point is near. Center returns nil.
-    static func dockEdge(
-        at point: CGPoint,
-        in size: CGSize
-    ) -> SplitTree<Ghostty.SurfaceView>.NewDirection? {
+    private static func uuid(from data: Data?) -> UUID? {
+        guard let data, let string = String(data: data, encoding: .utf8) else { return nil }
+        return UUID(uuidString: string)
+    }
+
+    /// Resolve where the cursor would dock.
+    private func resolveTarget(at point: CGPoint) -> WorkspaceDockTarget? {
         guard size.width > 0, size.height > 0 else { return nil }
-        let rx = point.x / size.width
-        let ry = point.y / size.height
+
+        // Near a window edge: dock against the whole terminal area.
+        let margin: CGFloat = 28
+        if point.x < margin { return .windowEdge(.left) }
+        if point.x > size.width - margin { return .windowEdge(.right) }
+        if point.y < margin { return .windowEdge(.up) }
+        if point.y > size.height - margin { return .windowEdge(.down) }
+
+        // Otherwise target the pane under the cursor.
+        guard let leaf = leafSlot(at: point) else { return nil }
+        guard case .leaf(let view) = leaf.node else { return nil }
+        let rx = (point.x - leaf.bounds.minX) / leaf.bounds.width
+        let ry = (point.y - leaf.bounds.minY) / leaf.bounds.height
         let candidates: [(SplitTree<Ghostty.SurfaceView>.NewDirection, CGFloat)] = [
             (.left, rx), (.right, 1 - rx), (.up, ry), (.down, 1 - ry),
         ]
-        guard let best = candidates.min(by: { $0.1 < $1.1 }) else { return nil }
-        return best.1 <= 0.3 ? best.0 : nil
+        let best = candidates.min { $0.1 < $1.1 }!
+        return .pane(view.id, best.1 <= 0.33 ? best.0 : nil)
+    }
+
+    private func highlightRect(for target: WorkspaceDockTarget?) -> CGRect? {
+        switch target {
+        case nil:
+            return nil
+        case .windowEdge(let edge):
+            switch edge {
+            case .left: return .init(x: 0, y: 0, width: size.width / 2, height: size.height)
+            case .right: return .init(x: size.width / 2, y: 0, width: size.width / 2, height: size.height)
+            case .up: return .init(x: 0, y: 0, width: size.width, height: size.height / 2)
+            case .down: return .init(x: 0, y: size.height / 2, width: size.width, height: size.height / 2)
+            }
+        case .pane(let id, let edge):
+            guard let slot = leafSlot(withID: id) else { return nil }
+            let b = slot.bounds
+            switch edge {
+            case nil: return b
+            case .left: return .init(x: b.minX, y: b.minY, width: b.width / 2, height: b.height)
+            case .right: return .init(x: b.midX, y: b.minY, width: b.width / 2, height: b.height)
+            case .up: return .init(x: b.minX, y: b.minY, width: b.width, height: b.height / 2)
+            case .down: return .init(x: b.minX, y: b.midY, width: b.width, height: b.height / 2)
+            }
+        }
+    }
+
+    private var spatialSlots: [SplitTree<Ghostty.SurfaceView>.Spatial.Slot] {
+        guard let root = controller?.surfaceTree.root else { return [] }
+        return root.spatial(within: size).slots
+    }
+
+    private func leafSlot(at point: CGPoint) -> SplitTree<Ghostty.SurfaceView>.Spatial.Slot? {
+        spatialSlots.first { slot in
+            if case .leaf = slot.node { return slot.bounds.contains(point) }
+            return false
+        }
+    }
+
+    private func leafSlot(withID id: UUID) -> SplitTree<Ghostty.SurfaceView>.Spatial.Slot? {
+        spatialSlots.first { slot in
+            if case .leaf(let view) = slot.node { return view.id == id }
+            return false
+        }
     }
 }
 
