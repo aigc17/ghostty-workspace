@@ -703,18 +703,32 @@ struct WorkspacePaneHeader: View {
                 .foregroundColor(.secondary)
             Spacer(minLength: 0)
             if hovered {
-                Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary.opacity(0.7))
-                Button {
-                    closePane()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(.secondary)
+                HStack(spacing: 9) {
+                    Button { split(.right) } label: {
+                        Image(systemName: "rectangle.split.2x1")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("向右分屏")
+                    Button { split(.down) } label: {
+                        Image(systemName: "rectangle.split.1x2")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("向下分屏")
+                    Button {
+                        closePane()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("关闭此终端")
                 }
-                .buttonStyle(.plain)
-                .help("关闭此终端")
+                .transition(.opacity)
             }
         }
         .padding(.horizontal, 8)
@@ -736,6 +750,14 @@ struct WorkspacePaneHeader: View {
                     controller?.workspaceDragEnded()
                 }
         )
+    }
+
+    /// Split this specific pane, inheriting its working directory.
+    private func split(_ direction: SplitTree<Ghostty.SurfaceView>.NewDirection) {
+        guard let controller else { return }
+        var config = Ghostty.SurfaceConfiguration()
+        config.workingDirectory = surface.pwd
+        controller.newSplit(at: surface, direction: direction, baseConfig: config)
     }
 
     private func closePane() {
@@ -822,30 +844,6 @@ struct WorkspaceTerminalArea: View {
                     .allowsHitTesting(false)
                 }
 
-                // Floating split buttons, Zed-style (top-right).
-                VStack {
-                    HStack {
-                        Spacer()
-                        HStack(spacing: 10) {
-                            Button { controller.newWorkspaceSplitTerminal(direction: .right) } label: {
-                                Image(systemName: "rectangle.split.2x1")
-                            }
-                            .buttonStyle(.plain)
-                            .help("向右新建终端")
-                            Button { controller.newWorkspaceSplitTerminal(direction: .down) } label: {
-                                Image(systemName: "rectangle.split.1x2")
-                            }
-                            .buttonStyle(.plain)
-                            .help("向下新建终端")
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.3)))
-                        .padding(8)
-                        .opacity(0.75)
-                    }
-                    Spacer()
-                }
             }
             .onAppear {
                 dragState.terminalFrame = geo.frame(in: .named(workspaceRootSpace))
@@ -922,8 +920,16 @@ struct WorkspaceSidebarView: View {
                 Spacer()
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(manager.projects) { project in
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(manager.projects.enumerated()), id: \.element.id) { index, project in
+                            if index > 0 {
+                                // 项目组之间的分隔:淡线 + 留白,按组分隔比固定
+                                // 数量分隔更贴合内容结构。
+                                Divider()
+                                    .opacity(0.4)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                            }
                             WorkspaceProjectSection(
                                 project: project,
                                 state: state,
@@ -1004,33 +1010,48 @@ struct WorkspaceProjectSection: View {
     @ObservedObject var state: WorkspaceState
     weak var controller: TerminalController?
 
+    @State private var hovered = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 5) {
-                Image(systemName: project.expanded ? "chevron.down" : "chevron.right")
+                Image(systemName: "chevron.right")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundColor(.secondary)
+                    .rotationEffect(.degrees(project.expanded ? 90 : 0))
                     .frame(width: 10)
                 Image(systemName: "folder")
                     .font(.system(size: 12))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(hovered ? .primary : .secondary)
                 Text(project.name)
                     .font(.system(size: 13, weight: .medium))
                     .lineLimit(1)
                     .help(project.path)
                 Spacer()
-                Button { controller?.newWorkspaceSession(in: project) } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 11))
+                // 按钮只在悬停时出现,减少静态视觉噪声。
+                if hovered {
+                    Button { controller?.newWorkspaceSession(in: project) } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("新建对话")
+                    .transition(.opacity)
                 }
-                .buttonStyle(.plain)
-                .help("新建对话")
             }
             .padding(.vertical, 5)
             .padding(.horizontal, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(hovered ? Color.primary.opacity(0.07) : Color.clear)
+            )
             .contentShape(Rectangle())
+            .onHover { value in
+                withAnimation(.easeOut(duration: 0.12)) { hovered = value }
+            }
             .onTapGesture {
-                withAnimation(.easeInOut(duration: 0.12)) { project.expanded.toggle() }
+                withAnimation(.easeInOut(duration: 0.15)) { project.expanded.toggle() }
             }
             .contextMenu {
                 Button("新建对话") { controller?.newWorkspaceSession(in: project) }
@@ -1068,16 +1089,33 @@ struct WorkspaceSessionRow: View {
     @ObservedObject var state: WorkspaceState
     weak var controller: TerminalController?
 
+    @State private var hovered = false
+
     private var isActive: Bool { state.activeSessionID == session.id }
+
+    private var rowBackground: Color {
+        if isActive { return Color.accentColor.opacity(0.24) }
+        if hovered { return Color.primary.opacity(0.06) }
+        return Color.clear
+    }
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "terminal")
                 .font(.system(size: 10))
-                .foregroundColor(isActive ? .primary : .secondary)
+                .foregroundColor(isActive || hovered ? .primary : .secondary)
             WorkspaceSessionTitle(session: session)
             Spacer()
-            if session.tree != nil {
+            if hovered {
+                Button { controller?.closeWorkspaceSession(session) } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("关闭对话")
+                .transition(.opacity)
+            } else if session.tree != nil {
                 Circle()
                     .fill(Color.green.opacity(0.8))
                     .frame(width: 6, height: 6)
@@ -1089,8 +1127,11 @@ struct WorkspaceSessionRow: View {
         .padding(.trailing, 8)
         .background(
             RoundedRectangle(cornerRadius: 5)
-                .fill(isActive ? Color.accentColor.opacity(0.22) : Color.clear)
+                .fill(rowBackground)
         )
+        .onHover { value in
+            withAnimation(.easeOut(duration: 0.12)) { hovered = value }
+        }
         .contentShape(Rectangle())
         .onTapGesture { controller?.activateWorkspaceSession(session) }
         .gesture(
