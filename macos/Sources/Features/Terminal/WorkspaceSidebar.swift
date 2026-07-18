@@ -1256,13 +1256,8 @@ struct WorkspaceSessionRow: View {
                 .buttonStyle(.plain)
                 .help("关闭对话")
                 .transition(.opacity)
-            } else if session.hasUnread {
-                // 该会话的终端发过桌面通知(如 AI 完成)且尚未查看。
-                // 绿点 = 有新消息(用户约定的交互认知)。
-                Circle()
-                    .fill(Color.green)
-                    .frame(width: 7, height: 7)
-                    .help("有新消息")
+            } else {
+                WorkspaceSessionStatus(session: session)
             }
         }
         .padding(.vertical, 4)
@@ -1315,6 +1310,47 @@ struct WorkspaceSessionRow: View {
             Divider()
             Button("关闭对话") { controller?.closeWorkspaceSession(session) }
         }
+    }
+}
+
+/// Trailing status for a session row: a spinner while the terminal reports
+/// progress (AI 回复中,由 OSC 9;4 驱动), else the green unread dot.
+struct WorkspaceSessionStatus: View {
+    @ObservedObject var session: WorkspaceSession
+
+    var body: some View {
+        if let surface = session.primarySurface {
+            WorkspaceSurfaceStatus(surface: surface, hasUnread: session.hasUnread)
+        } else if session.hasUnread {
+            WorkspaceUnreadDot()
+        }
+    }
+}
+
+struct WorkspaceSurfaceStatus: View {
+    @ObservedObject var surface: Ghostty.SurfaceView
+    let hasUnread: Bool
+
+    var body: some View {
+        if surface.progressReport != nil {
+            ProgressView()
+                .controlSize(.small)
+                .scaleEffect(0.55)
+                .frame(width: 12, height: 12)
+                .help("AI 回复中…")
+        } else if hasUnread {
+            WorkspaceUnreadDot()
+        }
+    }
+}
+
+/// 绿点 = 有新消息(用户约定的交互认知)。
+struct WorkspaceUnreadDot: View {
+    var body: some View {
+        Circle()
+            .fill(Color.green)
+            .frame(width: 7, height: 7)
+            .help("有新消息")
     }
 }
 

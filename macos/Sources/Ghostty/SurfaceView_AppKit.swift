@@ -51,9 +51,13 @@ extension Ghostty {
                 progressReportTimer?.invalidate()
                 progressReportTimer = nil
                 
-                // If we have a new progress report, start a timer to remove it after 15 seconds
-                if progressReport != nil {
-                    progressReportTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: false) { [weak self] _ in
+                // If we have a new progress report, start a timer to remove it
+                // if it goes stale. Indeterminate reports get a much longer
+                // window: AI CLI turns (signaled via hooks) can legitimately
+                // run for a long time without further updates.
+                if let report = progressReport {
+                    let timeout: TimeInterval = report.state == .indeterminate ? 3600.0 : 15.0
+                    progressReportTimer = Timer.scheduledTimer(withTimeInterval: timeout, repeats: false) { [weak self] _ in
                         self?.progressReport = nil
                         self?.progressReportTimer = nil
                     }
