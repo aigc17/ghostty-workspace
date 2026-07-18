@@ -92,6 +92,7 @@
 		A59630972AEE163600D64628 /* HostingWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A59630962AEE163600D64628 /* HostingWindow.swift */; };
 		A596309A2AEE1C6400D64628 /* Terminal.xib in Resources */ = {isa = PBXBuildFile; fileRef = A59630992AEE1C6400D64628 /* Terminal.xib */; };
 		A596309C2AEE1C9E00D64628 /* TerminalController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A596309B2AEE1C9E00D64628 /* TerminalController.swift */; };
+		FA57C0DE0000000000000002 /* WorkspaceSidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA57C0DE0000000000000001 /* WorkspaceSidebar.swift */; };
 		A596309E2AEE1D6C00D64628 /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A596309D2AEE1D6C00D64628 /* TerminalView.swift */; };
 		A5985CD72C320C4500C57AD3 /* String+Extension.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5985CD62C320C4500C57AD3 /* String+Extension.swift */; };
 		A5985CD82C320C4500C57AD3 /* String+Extension.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5985CD62C320C4500C57AD3 /* String+Extension.swift */; };
@@ -245,6 +246,7 @@
 		A59630962AEE163600D64628 /* HostingWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostingWindow.swift; sourceTree = "<group>"; };
 		A59630992AEE1C6400D64628 /* Terminal.xib */ = {isa = PBXFileReference; lastKnownFileType = file.xib; path = Terminal.xib; sourceTree = "<group>"; };
 		A596309B2AEE1C9E00D64628 /* TerminalController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalController.swift; sourceTree = "<group>"; };
+		FA57C0DE0000000000000001 /* WorkspaceSidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSidebar.swift; sourceTree = "<group>"; };
 		A596309D2AEE1D6C00D64628 /* TerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalView.swift; sourceTree = "<group>"; };
 		A5985CD62C320C4500C57AD3 /* String+Extension.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = "String+Extension.swift"; sourceTree = "<group>"; };
 		A5985CE52C33060F00C57AD3 /* man */ = {isa = PBXFileReference; lastKnownFileType = folder; name = man; path = "../zig-out/share/man"; sourceTree = "<group>"; };
@@ -589,6 +591,7 @@
 			children = (
 				A5593FDD2DF8D56000B47B10 /* Window Styles */,
 				A596309B2AEE1C9E00D64628 /* TerminalController.swift */,
+				FA57C0DE0000000000000001 /* WorkspaceSidebar.swift */,
 				A5D0AF3A2B36A1DE00D21823 /* TerminalRestorable.swift */,
 				A596309D2AEE1D6C00D64628 /* TerminalView.swift */,
 				A535B9D9299C569B0017E2E4 /* ErrorView.swift */,
@@ -898,6 +901,7 @@
 				A5E408342E0320140035FEAC /* GetTerminalDetailsIntent.swift in Sources */,
 				A5CBD0642CA122E70017A1AE /* QuickTerminalPosition.swift in Sources */,
 				A596309C2AEE1C9E00D64628 /* TerminalController.swift in Sources */,
+				FA57C0DE0000000000000002 /* WorkspaceSidebar.swift in Sources */,
 				A5E408322E02FEDF0035FEAC /* TerminalEntity.swift in Sources */,
 				A5CC36152C9CDA06004D6760 /* View+Extension.swift in Sources */,
 				A56D58892ACDE6CA00508D2C /* ServiceProvider.swift in Sources */,

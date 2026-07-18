@@ -56,6 +56,17 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     /// This will be set to the initial frame of the window from the xib on load.
     private var initialFrame: NSRect? = nil
 
+    // MARK: Workspace (项目/对话侧边栏)
+
+    /// Per-window sidebar UI state.
+    let workspaceState = WorkspaceState()
+
+    /// The workspace session currently shown in this window, if any.
+    var activeWorkspaceSession: WorkspaceSession? = nil
+
+    /// The working directory this window's initial surface was configured with.
+    private(set) var initialWorkspacePwd: String? = nil
+
     init(_ ghostty: Ghostty.App,
          withBaseConfig base: Ghostty.SurfaceConfiguration? = nil,
          withSurfaceTree tree: SplitTree<Ghostty.SurfaceView>? = nil,
@@ -70,6 +81,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // Setup our initial derived config based on the current app config
         self.derivedConfig = DerivedConfig(ghostty.config)
+
+        // Remember the working directory the initial surface starts in so we
+        // can file it under the right workspace project.
+        self.initialWorkspacePwd = base?.workingDirectory
 
         super.init(ghostty, baseConfig: base, surfaceTree: tree)
 
@@ -147,6 +162,18 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // Update our zoom state
         if let window = window as? TerminalWindow {
             window.surfaceIsZoomed = to.zoomed != nil
+        }
+
+        // Keep the shown workspace session's stored tree in sync so splits
+        // survive session switches.
+        if let session = activeWorkspaceSession {
+            if to.isEmpty {
+                // The session's last surface closed: remove it and switch to
+                // the next session instead of closing the window if possible.
+                if handleActiveWorkspaceSessionClosed(session) { return }
+            } else {
+                session.tree = to
+            }
         }
 
         // If our surface tree is now nil then we close our window.
@@ -948,12 +975,16 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
         }
 
-        // Initialize our content view to the SwiftUI root
-        window.contentView = NSHostingView(rootView: TerminalView(
+        // Initialize our content view to the SwiftUI root: the workspace
+        // sidebar (项目/对话) plus the terminal view.
+        window.contentView = NSHostingView(rootView: WorkspaceRootView(
             ghostty: self.ghostty,
-            viewModel: self,
-            delegate: self
+            controller: self,
+            state: self.workspaceState
         ))
+
+        // Register this window's initial surface in the sidebar.
+        adoptInitialWorkspaceSession()
 
         // In various situations, macOS automatically tabs new windows. Ghostty handles
         // its own tabbing so we DONT want this behavior. This detects this scenario and undoes
