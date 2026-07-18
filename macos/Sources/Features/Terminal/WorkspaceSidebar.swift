@@ -28,6 +28,10 @@ class WorkspaceSession: ObservableObject, Identifiable {
     /// windows recreated by native window restoration.
     var restoredSurfaceUUID: UUID? = nil
 
+    /// True once the user renamed this session; the title then stops
+    /// following the live terminal title.
+    var userRenamed: Bool = false
+
     var primarySurface: Ghostty.SurfaceView? {
         guard let tree else { return nil }
         return Array(tree).first
@@ -40,7 +44,9 @@ class WorkspaceSession: ObservableObject, Identifiable {
     }
 
     /// Sync the stored title from the live surface, e.g. before persisting.
+    /// User-renamed sessions keep their custom title.
     func syncTitle() {
+        guard !userRenamed else { return }
         if let t = primarySurface?.title, !t.isEmpty {
             title = t
         }
@@ -172,6 +178,7 @@ class ProjectManager: ObservableObject {
         var title: String
         var workingDirectory: String
         var surfaceUUID: UUID?
+        var userRenamed: Bool?
     }
 
     private struct ProjectDTO: Codable {
@@ -195,7 +202,8 @@ class ProjectManager: ObservableObject {
                         id: session.id,
                         title: session.title,
                         workingDirectory: session.workingDirectory,
-                        surfaceUUID: session.primarySurface?.id ?? session.restoredSurfaceUUID)
+                        surfaceUUID: session.primarySurface?.id ?? session.restoredSurfaceUUID,
+                        userRenamed: session.userRenamed ? true : nil)
                 })
         }
         do {
@@ -220,6 +228,7 @@ class ProjectManager: ObservableObject {
                     title: sd.title,
                     workingDirectory: sd.workingDirectory)
                 session.restoredSurfaceUUID = sd.surfaceUUID
+                session.userRenamed = sd.userRenamed ?? false
                 return session
             }
             return project
@@ -381,6 +390,30 @@ extension TerminalController {
             session.tree = nil
         }
         manager.removeProject(project)
+    }
+
+    /// Show a rename sheet with a text field; calls completion with the
+    /// trimmed non-empty result.
+    func promptWorkspaceRename(
+        title: String,
+        current: String,
+        completion: @escaping (String) -> Void
+    ) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.addButton(withTitle: "确定")
+        alert.addButton(withTitle: "取消")
+        let field = NSTextField(frame: .init(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = current
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            let value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else { return }
+            completion(value)
+        }
     }
 
     /// Prompt for a directory and add it as a project.
@@ -1122,9 +1155,27 @@ struct WorkspaceProjectSection: View {
             }
             .contextMenu {
                 Button("新建对话") { controller?.newWorkspaceSession(in: project) }
+                Divider()
                 Button("在访达中打开") {
                     NSWorkspace.shared.activateFileViewerSelecting(
                         [URL(fileURLWithPath: project.path)])
+                }
+                Button("复制项目路径") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(project.path, forType: .string)
+                }
+                Button("重命名项目…") {
+                    controller?.promptWorkspaceRename(title: "重命名项目", current: project.name) { name in
+                        project.name = name
+                        ProjectManager.shared.save()
+                    }
+                }
+                Divider()
+                Button("全部展开") {
+                    ProjectManager.shared.projects.forEach { $0.expanded = true }
+                }
+                Button("全部折叠") {
+                    ProjectManager.shared.projects.forEach { $0.expanded = false }
                 }
                 Divider()
                 Button("移除项目(关闭其所有对话)") { controller?.removeWorkspaceProject(project) }
@@ -1216,6 +1267,17 @@ struct WorkspaceSessionRow: View {
             }
         }
         .contextMenu {
+            Button("重命名对话…") {
+                controller?.promptWorkspaceRename(title: "重命名对话", current: session.title) { name in
+                    session.title = name
+                    session.userRenamed = true
+                    ProjectManager.shared.save()
+                }
+            }
+            Button("复制路径") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(session.workingDirectory, forType: .string)
+            }
             Button("在访达中打开") {
                 NSWorkspace.shared.activateFileViewerSelecting(
                     [URL(fileURLWithPath: session.workingDirectory)])
@@ -1231,7 +1293,7 @@ struct WorkspaceSessionTitle: View {
     @ObservedObject var session: WorkspaceSession
 
     var body: some View {
-        if let surface = session.primarySurface {
+        if !session.userRenamed, let surface = session.primarySurface {
             WorkspaceSurfaceTitle(surface: surface, fallback: session.title)
         } else {
             Text(session.title)
