@@ -535,33 +535,72 @@ enum WorkspaceDockTarget: Equatable {
     case pane(UUID, SplitTree<Ghostty.SurfaceView>.NewDirection?)
 }
 
-/// The drag grip shown at the top of each split pane.
-struct WorkspacePaneDragHandle: View {
-    let surface: Ghostty.SurfaceView
+/// Build the item provider for workspace drags. Uses the plain
+/// `init(item:typeIdentifier:)` registration so the drag pasteboard always
+/// carries the type (per-closure registration with restricted visibility can
+/// yield an empty pasteboard and a drag that never starts).
+func workspaceDragItemProvider(type: UTType, uuid: UUID) -> NSItemProvider {
+    NSItemProvider(
+        item: uuid.uuidString.data(using: .utf8)! as NSData,
+        typeIdentifier: type.identifier)
+}
+
+/// The tab-like header bar on top of each terminal pane. The whole bar is a
+/// drag handle for re-docking the pane; hovering reveals a close button.
+struct WorkspacePaneHeader: View {
+    @ObservedObject var surface: Ghostty.SurfaceView
     @State private var hovered = false
 
     var body: some View {
-        Image(systemName: "line.3.horizontal")
-            .font(.system(size: 9, weight: .bold))
-            .foregroundColor(.white.opacity(hovered ? 0.95 : 0.4))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 3)
-            .background(Capsule().fill(Color.black.opacity(hovered ? 0.55 : 0.22)))
-            .padding(.top, 3)
-            .onHover { hovered = $0 }
-            .help("拖动此分区到其他位置")
-            .onDrag {
-                let provider = NSItemProvider()
-                let uuid = surface.id.uuidString
-                provider.registerDataRepresentation(
-                    forTypeIdentifier: workspacePaneUTType.identifier,
-                    visibility: .ownProcess
-                ) { completion in
-                    completion(uuid.data(using: .utf8), nil)
-                    return nil
+        HStack(spacing: 6) {
+            Image(systemName: "terminal")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+            Text(surface.title.isEmpty ? "终端" : surface.title)
+                .font(.system(size: 11.5))
+                .lineLimit(1)
+                .foregroundColor(.secondary)
+            Spacer(minLength: 0)
+            if hovered {
+                Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary.opacity(0.7))
+                Button {
+                    closePane()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.secondary)
                 }
-                return provider
+                .buttonStyle(.plain)
+                .help("关闭此终端")
             }
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 24)
+        .frame(maxWidth: .infinity)
+        .background(Color.black.opacity(hovered ? 0.3 : 0.16))
+        .contentShape(Rectangle())
+        .onHover { hovered = $0 }
+        .help("拖动标签栏可把此终端停靠到其他分区")
+        .onDrag {
+            workspaceDragItemProvider(type: workspacePaneUTType, uuid: surface.id)
+        }
+    }
+
+    private func closePane() {
+        guard let controller = surface.window?.windowController as? TerminalController else {
+            (surface.window?.windowController as? BaseTerminalController)?.closeSurface(surface)
+            return
+        }
+        // A lone pane closes through the workspace path so the window switches
+        // to the next session instead of closing outright.
+        if case .leaf = controller.surfaceTree.root,
+           let session = controller.activeWorkspaceSession {
+            controller.closeWorkspaceSession(session)
+        } else {
+            controller.closeSurface(surface)
+        }
     }
 }
 
@@ -1024,16 +1063,7 @@ struct WorkspaceSessionRow: View {
         .onTapGesture { controller?.activateWorkspaceSession(session) }
         .onDrag {
             // Drag a session into the terminal area to dock it as a split.
-            let provider = NSItemProvider()
-            let uuid = session.id.uuidString
-            provider.registerDataRepresentation(
-                forTypeIdentifier: workspaceSessionUTType.identifier,
-                visibility: .ownProcess
-            ) { completion in
-                completion(uuid.data(using: .utf8), nil)
-                return nil
-            }
-            return provider
+            workspaceDragItemProvider(type: workspaceSessionUTType, uuid: session.id)
         }
         .contextMenu {
             Button("在访达中打开") {

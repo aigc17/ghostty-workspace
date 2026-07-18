@@ -29,15 +29,16 @@ struct TerminalSplitSubtreeView: View {
     var body: some View {
         switch (node) {
         case .leaf(let leafView):
-            Ghostty.InspectableSurface(
-                surfaceView: leafView,
-                isSplit: !isRoot)
-                .accessibilityElement(children: .contain)
-                .accessibilityLabel("Terminal pane")
-                // Zed-style: splits get a drag grip to re-dock the pane elsewhere.
-                .overlay(
-                    isRoot ? nil : WorkspacePaneDragHandle(surface: leafView),
-                    alignment: .top)
+            // Zed-style: every pane gets a tab-like header that can be
+            // dragged to re-dock the pane elsewhere.
+            VStack(spacing: 0) {
+                WorkspacePaneHeader(surface: leafView)
+                Ghostty.InspectableSurface(
+                    surfaceView: leafView,
+                    isSplit: !isRoot)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel("Terminal pane")
+            }
 
         case .split(let split):
             let splitViewDirection: SplitViewDirection = switch (split.direction) {
