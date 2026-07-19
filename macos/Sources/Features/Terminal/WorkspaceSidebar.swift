@@ -57,6 +57,59 @@ class WorkspaceSession: ObservableObject, Identifiable {
     }
 }
 
+/// Finder 式颜色标签。
+enum WorkspaceColorTag: String, CaseIterable {
+    case red, orange, yellow, green, blue, purple, gray
+
+    var color: Color {
+        switch self {
+        case .red: return .red
+        case .orange: return .orange
+        case .yellow: return .yellow
+        case .green: return .green
+        case .blue: return .blue
+        case .purple: return .purple
+        case .gray: return .gray
+        }
+    }
+
+    var nsColor: NSColor {
+        switch self {
+        case .red: return .systemRed
+        case .orange: return .systemOrange
+        case .yellow: return .systemYellow
+        case .green: return .systemGreen
+        case .blue: return .systemBlue
+        case .purple: return .systemPurple
+        case .gray: return .systemGray
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .red: return "红色"
+        case .orange: return "橙色"
+        case .yellow: return "黄色"
+        case .green: return "绿色"
+        case .blue: return "蓝色"
+        case .purple: return "紫色"
+        case .gray: return "灰色"
+        }
+    }
+
+    /// A filled-circle swatch that keeps its color inside AppKit menus
+    /// (template SF symbols get stripped to monochrome there).
+    var menuImage: NSImage {
+        let image = NSImage(size: .init(width: 14, height: 14), flipped: false) { rect in
+            self.nsColor.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 1.5, dy: 1.5)).fill()
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+}
+
 /// 一个「项目」:一个目录 + 其下的对话列表。
 class WorkspaceProject: ObservableObject, Identifiable {
     let id: UUID
@@ -64,6 +117,12 @@ class WorkspaceProject: ObservableObject, Identifiable {
     let path: String
     @Published var sessions: [WorkspaceSession]
     @Published var expanded: Bool = true
+
+    /// 置顶:显示在项目列表最前。
+    @Published var pinned: Bool = false
+
+    /// Finder 式颜色标签(WorkspaceColorTag rawValue),nil 为无标签。
+    @Published var colorTag: String? = nil
 
     init(id: UUID = UUID(), name: String, path: String, sessions: [WorkspaceSession] = []) {
         self.id = id
@@ -106,6 +165,17 @@ class ProjectManager: ObservableObject {
 
     var allSessions: [WorkspaceSession] {
         projects.flatMap { $0.sessions }
+    }
+
+    /// Sidebar display order: pinned projects first, original order otherwise.
+    var displayProjects: [WorkspaceProject] {
+        projects.filter(\.pinned) + projects.filter { !$0.pinned }
+    }
+
+    func togglePin(_ project: WorkspaceProject) {
+        objectWillChange.send()
+        project.pinned.toggle()
+        save()
     }
 
     func project(containing session: WorkspaceSession) -> WorkspaceProject? {
@@ -205,6 +275,8 @@ class ProjectManager: ObservableObject {
         var id: UUID
         var name: String
         var path: String
+        var pinned: Bool?
+        var colorTag: String?
         var sessions: [SessionDTO]
     }
 
@@ -217,6 +289,8 @@ class ProjectManager: ObservableObject {
                 id: project.id,
                 name: project.name,
                 path: project.path,
+                pinned: project.pinned ? true : nil,
+                colorTag: project.colorTag,
                 sessions: project.sessions.map { session in
                     SessionDTO(
                         id: session.id,
@@ -242,6 +316,8 @@ class ProjectManager: ObservableObject {
               let dtos = try? JSONDecoder().decode([ProjectDTO].self, from: data) else { return }
         projects = dtos.map { pd in
             let project = WorkspaceProject(id: pd.id, name: pd.name, path: pd.path)
+            project.pinned = pd.pinned ?? false
+            project.colorTag = pd.colorTag
             project.sessions = pd.sessions.map { sd in
                 let session = WorkspaceSession(
                     id: sd.id,
@@ -1225,7 +1301,7 @@ struct WorkspaceSidebarView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(manager.projects.enumerated()), id: \.element.id) { index, project in
+                        ForEach(Array(manager.displayProjects.enumerated()), id: \.element.id) { index, project in
                             if index > 0 {
                                 // 项目组之间的分隔:淡线 + 留白,按组分隔比固定
                                 // 数量分隔更贴合内容结构。
@@ -1316,6 +1392,14 @@ struct WorkspaceProjectSection: View {
 
     @State private var hovered = false
 
+    /// 颜色标签对应的填充色;无标签时按悬停态取灰调。
+    private var folderColor: Color {
+        if let tag = project.colorTag.flatMap({ WorkspaceColorTag(rawValue: $0) }) {
+            return tag.color
+        }
+        return hovered ? .primary : .secondary
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 5) {
@@ -1326,12 +1410,18 @@ struct WorkspaceProjectSection: View {
                     .frame(width: 10)
                 Image(systemName: "folder.fill")
                     .font(.system(size: 12.5))
-                    .foregroundColor(hovered ? .primary : .secondary)
+                    .foregroundColor(folderColor)
                 Text(project.name)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(.primary)
                     .lineLimit(1)
                     .help(project.path)
+                if project.pinned {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 8))
+                        .foregroundColor(Color.secondary.opacity(0.7))
+                        .help("已置顶")
+                }
                 Spacer()
                 // 按钮只在悬停时出现,减少静态视觉噪声。
                 if hovered {
@@ -1360,6 +1450,29 @@ struct WorkspaceProjectSection: View {
             }
             .contextMenu {
                 Button("新建对话") { controller?.newWorkspaceSession(in: project) }
+                Divider()
+                Button(project.pinned ? "取消置顶" : "置顶项目") {
+                    ProjectManager.shared.togglePin(project)
+                }
+                Menu("标签") {
+                    ForEach(WorkspaceColorTag.allCases, id: \.self) { tag in
+                        Button {
+                            project.colorTag = tag.rawValue
+                            ProjectManager.shared.save()
+                        } label: {
+                            Label {
+                                Text(tag.title)
+                            } icon: {
+                                Image(nsImage: tag.menuImage)
+                            }
+                        }
+                    }
+                    Divider()
+                    Button("移除标签") {
+                        project.colorTag = nil
+                        ProjectManager.shared.save()
+                    }
+                }
                 Divider()
                 Button("在访达中打开") {
                     NSWorkspace.shared.activateFileViewerSelecting(
