@@ -823,7 +823,35 @@ extension TerminalController {
                 // Center: just show that session.
                 activateWorkspaceSession(session)
             }
+        case .project(let uuid):
+            guard let project = ProjectManager.shared.projects.first(where: { $0.id == uuid })
+            else { return }
+            dockWorkspaceProject(project, target: target)
         }
+    }
+
+    /// Dock a dragged project: open a fresh terminal in the project's
+    /// directory as a split at the drop position. This is how a single
+    /// layout mixes terminals from multiple projects.
+    func dockWorkspaceProject(_ project: WorkspaceProject, target: WorkspaceDockTarget) {
+        guard activeWorkspaceSession != nil, !surfaceTree.isEmpty else {
+            // Nothing to split against: open a normal session instead.
+            newWorkspaceSession(in: project)
+            return
+        }
+        guard let app = ghostty.app else { return }
+        var config = Ghostty.SurfaceConfiguration()
+        config.workingDirectory = project.path
+        let merged: SplitTree<Ghostty.SurfaceView>.Node =
+            .leaf(view: Ghostty.SurfaceView(app, baseConfig: config))
+
+        guard let newTree = workspaceInserting(merged, into: surfaceTree, at: target) else { return }
+        undoManager?.removeAllActions(withTarget: self)
+        surfaceTree = newTree
+
+        let focusView = merged.leftmostLeaf()
+        focusedSurface = focusView
+        Ghostty.moveFocus(to: focusView)
     }
 
     /// Move an existing pane (dragged by its grip) to a new dock target:
@@ -936,6 +964,9 @@ final class WorkspaceDragState: ObservableObject {
     enum Payload: Equatable {
         case pane(UUID)
         case session(UUID)
+        /// Dragging a project row: dock creates a fresh terminal in the
+        /// project's directory (multi-project splits).
+        case project(UUID)
     }
 
     /// What's being dragged; nil when no drag is active.
@@ -1447,6 +1478,24 @@ struct WorkspaceProjectSection: View {
             }
             .onTapGesture {
                 withAnimation(.easeInOut(duration: 0.15)) { project.expanded.toggle() }
+            }
+            .gesture(
+                // 拖动项目到终端区:在落点处新开该项目目录的终端(跨项目分屏)。
+                DragGesture(minimumDistance: 4, coordinateSpace: .named(workspaceRootSpace))
+                    .onChanged { value in
+                        controller?.workspaceDragChanged(
+                            payload: .project(project.id),
+                            label: project.name,
+                            rootLocation: value.location)
+                    }
+                    .onEnded { _ in
+                        controller?.workspaceDragEnded()
+                    }
+            )
+            .onDisappear {
+                if controller?.workspaceDragState.payload == .project(project.id) {
+                    controller?.workspaceDragState.reset()
+                }
             }
             .contextMenu {
                 Button("新建对话") { controller?.newWorkspaceSession(in: project) }
