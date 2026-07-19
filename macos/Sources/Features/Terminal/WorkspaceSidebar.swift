@@ -104,12 +104,24 @@ enum WorkspaceColorTag: String, CaseIterable, Identifiable {
         }
     }
 
-    /// A filled-circle swatch that keeps its color inside AppKit menus
-    /// (template SF symbols get stripped to monochrome there).
-    var menuImage: NSImage {
-        let image = NSImage(size: .init(width: 14, height: 14), flipped: false) { rect in
+    /// A filled-circle swatch drawn as a plain bitmap so AppKit menus keep
+    /// its colors (symbol styling gets stripped there). Selected state draws
+    /// a white checkmark on top.
+    func menuImage(selected: Bool) -> NSImage {
+        let image = NSImage(size: .init(width: 16, height: 16), flipped: false) { rect in
             self.nsColor.setFill()
-            NSBezierPath(ovalIn: rect.insetBy(dx: 1.5, dy: 1.5)).fill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1)).fill()
+            if selected {
+                let check = NSBezierPath()
+                check.move(to: .init(x: 4.6, y: 8.1))
+                check.line(to: .init(x: 7.0, y: 5.7))
+                check.line(to: .init(x: 11.4, y: 10.5))
+                check.lineWidth = 1.9
+                check.lineCapStyle = .round
+                check.lineJoinStyle = .round
+                NSColor.white.setStroke()
+                check.stroke()
+            }
             return true
         }
         image.isTemplate = false
@@ -1153,14 +1165,8 @@ struct WorkspaceTagPicker: View {
         return Button {
             set(selected ? nil : tag.rawValue)
         } label: {
-            if selected {
-                // 白色对勾 + 标签色圆底。
-                Image(systemName: "checkmark.circle.fill")
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(Color.white, tag.color)
-            } else {
-                Image(systemName: "circle.fill")
-            }
+            // 自绘位图:彩色圆底 + 选中时白色对勾,菜单不会篡改颜色。
+            Image(nsImage: tag.menuImage(selected: selected))
         }
         .tint(tag.color)
         .help(tag.title)
