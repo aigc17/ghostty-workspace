@@ -1541,8 +1541,12 @@ struct WorkspaceSidebarView: View {
                             sectionLabel("置顶")
                             projectRows(pinnedProjects)
                             if !normalProjects.isEmpty {
+                                // 分组之间的分割线:比组内分隔更实,拉开层级。
+                                Divider()
+                                    .padding(.horizontal, 4)
+                                    .padding(.top, 10)
+                                    .padding(.bottom, 8)
                                 sectionLabel("项目")
-                                    .padding(.top, 8)
                             }
                         }
                         projectRows(normalProjects)
