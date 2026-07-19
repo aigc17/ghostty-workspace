@@ -63,8 +63,10 @@ class WorkspaceSession: ObservableObject, Identifiable {
 }
 
 /// Finder 式颜色标签。
-enum WorkspaceColorTag: String, CaseIterable {
+enum WorkspaceColorTag: String, CaseIterable, Identifiable {
     case red, orange, yellow, green, blue, purple, gray
+
+    var id: String { rawValue }
 
     var color: Color {
         switch self {
@@ -1123,6 +1125,47 @@ enum WorkspaceDockResolver {
 /// The named coordinate space covering the whole workspace root view.
 let workspaceRootSpace = "workspaceRoot"
 
+/// Finder 式颜色标签选择器:一排彩色圆点,点击选中、再点同色取消。
+struct WorkspaceTagPicker: View {
+    @ObservedObject var project: WorkspaceProject
+
+    var body: some View {
+        if #available(macOS 14.0, *) {
+            ControlGroup {
+                ForEach(WorkspaceColorTag.allCases) { tag in
+                    tagButton(tag)
+                }
+            }
+            .controlGroupStyle(.palette)
+        } else {
+            Menu("标签") {
+                ForEach(WorkspaceColorTag.allCases) { tag in
+                    Button(tag.title) { set(tag.rawValue) }
+                }
+                Divider()
+                Button("移除标签") { set(nil) }
+            }
+        }
+    }
+
+    private func tagButton(_ tag: WorkspaceColorTag) -> some View {
+        Button {
+            set(project.colorTag == tag.rawValue ? nil : tag.rawValue)
+        } label: {
+            Image(systemName: project.colorTag == tag.rawValue
+                ? "checkmark.circle.fill"
+                : "circle.fill")
+        }
+        .tint(tag.color)
+        .help(tag.title)
+    }
+
+    private func set(_ value: String?) {
+        project.colorTag = value
+        ProjectManager.shared.save()
+    }
+}
+
 /// 分区标签栏上的项目徽章:用实时 pwd 匹配项目,名称与颜色标签同色,
 /// 让多项目混排布局里每个终端的归属一目了然。
 struct WorkspaceProjectBadge: View {
@@ -1750,42 +1793,7 @@ struct WorkspaceProjectSection: View {
                 Button(project.pinned ? "取消置顶" : "置顶项目") {
                     ProjectManager.shared.togglePin(project)
                 }
-                if #available(macOS 14.0, *) {
-                    // Finder 式一排颜色圆点:点击选中,再点同色取消。
-                    ControlGroup {
-                        ForEach(WorkspaceColorTag.allCases) { tag in
-                            Button {
-                                if project.colorTag == tag.rawValue {
-                                    project.colorTag = nil
-                                } else {
-                                    project.colorTag = tag.rawValue
-                                }
-                                ProjectManager.shared.save()
-                            } label: {
-                                Image(systemName: project.colorTag == tag.rawValue
-                                    ? "checkmark.circle.fill"
-                                    : "circle.fill")
-                            }
-                            .tint(tag.color)
-                            .help(tag.title)
-                        }
-                    }
-                    .controlGroupStyle(.palette)
-                } else {
-                    Menu("标签") {
-                        ForEach(WorkspaceColorTag.allCases, id: \.self) { tag in
-                            Button(tag.title) {
-                                project.colorTag = tag.rawValue
-                                ProjectManager.shared.save()
-                            }
-                        }
-                        Divider()
-                        Button("移除标签") {
-                            project.colorTag = nil
-                            ProjectManager.shared.save()
-                        }
-                    }
-                }
+                WorkspaceTagPicker(project: project)
                 Divider()
                 Button("在访达中打开") {
                     NSWorkspace.shared.activateFileViewerSelecting(
