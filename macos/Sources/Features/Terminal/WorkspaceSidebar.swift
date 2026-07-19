@@ -1054,14 +1054,44 @@ enum WorkspaceDockResolver {
 /// The named coordinate space covering the whole workspace root view.
 let workspaceRootSpace = "workspaceRoot"
 
+/// 分区标签栏上的项目徽章:用实时 pwd 匹配项目,名称与颜色标签同色,
+/// 让多项目混排布局里每个终端的归属一目了然。
+struct WorkspaceProjectBadge: View {
+    @ObservedObject var project: WorkspaceProject
+
+    private var tagColor: Color? {
+        project.colorTag.flatMap { WorkspaceColorTag(rawValue: $0)?.color }
+    }
+
+    var body: some View {
+        Text(project.name)
+            .font(.system(size: 9.5, weight: .semibold))
+            .lineLimit(1)
+            .foregroundColor(tagColor ?? .secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill((tagColor ?? Color.primary).opacity(0.15)))
+    }
+}
+
 /// The tab-like header bar on top of each terminal pane. The whole bar is a
 /// drag handle for re-docking the pane; hovering reveals a close button.
 struct WorkspacePaneHeader: View {
     @ObservedObject var surface: Ghostty.SurfaceView
+    @ObservedObject private var manager: ProjectManager = .shared
     @State private var hovered = false
 
     private var controller: TerminalController? {
         surface.window?.windowController as? TerminalController
+    }
+
+    /// The project this pane currently belongs to, by longest path match of
+    /// the live working directory (follows `cd` between projects honestly).
+    private var matchedProject: WorkspaceProject? {
+        guard let pwd = surface.pwd, !pwd.isEmpty else { return nil }
+        return manager.projects
+            .filter { pwd == $0.path || pwd.hasPrefix($0.path + "/") }
+            .max { $0.path.count < $1.path.count }
     }
 
     var body: some View {
@@ -1069,6 +1099,9 @@ struct WorkspacePaneHeader: View {
             Image(systemName: "terminal")
                 .font(.system(size: 10))
                 .foregroundColor(.secondary)
+            if let project = matchedProject {
+                WorkspaceProjectBadge(project: project)
+            }
             Text(surface.title.isEmpty ? "终端" : surface.title)
                 .font(.system(size: 11.5))
                 .lineLimit(1)
