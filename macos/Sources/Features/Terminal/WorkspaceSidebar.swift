@@ -1188,18 +1188,21 @@ struct WorkspaceRootView: View {
     @ObservedObject var state: WorkspaceState
     @ObservedObject var manager: ProjectManager = .shared
 
+    /// 侧边栏宽度,可拖拽调节并持久化。
+    @AppStorage("WorkspaceSidebarWidth") private var sidebarWidth: Double = 240
+
     var body: some View {
         HStack(spacing: 0) {
             if state.sidebarVisible {
                 // 不自绘背景:透出窗口背景色(Ghostty 会把它同步成终端
                 // 当前的主题背景色),保证侧边栏与终端面板颜色一致。
                 WorkspaceSidebarView(manager: manager, state: state, controller: controller)
-                    .frame(width: 240)
+                    .frame(width: CGFloat(min(420, max(180, sidebarWidth))))
+                WorkspaceSidebarResizeHandle(width: $sidebarWidth)
             } else {
                 WorkspaceCollapsedRail(state: state)
+                Divider()
             }
-
-            Divider()
 
             if let controller {
                 WorkspaceTerminalArea(
@@ -1209,6 +1212,38 @@ struct WorkspaceRootView: View {
             }
         }
         .coordinateSpace(name: workspaceRootSpace)
+    }
+}
+
+/// The draggable divider between the sidebar and the terminal area.
+struct WorkspaceSidebarResizeHandle: View {
+    @Binding var width: Double
+    @State private var startWidth: Double? = nil
+
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(Color.primary.opacity(0.12))
+                .frame(width: 1)
+        }
+        .frame(width: 6)
+        .frame(maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .onHover { inside in
+            if inside {
+                NSCursor.resizeLeftRight.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 1)
+                .onChanged { value in
+                    if startWidth == nil { startWidth = width }
+                    width = min(420, max(180, (startWidth ?? width) + value.translation.width))
+                }
+                .onEnded { _ in startWidth = nil }
+        )
     }
 }
 
