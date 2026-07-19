@@ -1508,6 +1508,16 @@ struct WorkspaceSidebarView: View {
                 .help("排序方式")
                 Button {
                     guard let controller else { return }
+                    // 临时对话:挂在主目录(Home)项目下的纯终端。
+                    let home = ProjectManager.shared.project(forPath: NSHomeDirectory())
+                    controller.newWorkspaceSession(in: home)
+                } label: {
+                    Image(systemName: "square.and.pencil")
+                }
+                .buttonStyle(.plain)
+                .help("新建对话(主目录)")
+                Button {
+                    guard let controller else { return }
                     if WorkspaceClaudeIntegration.isConfigured() {
                         controller.showWorkspaceInfoAlert(
                             "已配置",
