@@ -215,22 +215,21 @@ class ProjectManager: ObservableObject {
         didSet { UserDefaults.standard.set(sortOrder.rawValue, forKey: "WorkspaceProjectSortOrder") }
     }
 
-    /// Sidebar display order: pinned projects first, then the chosen sort.
+    /// Projects in the chosen sort order. The sidebar splits pinned ones
+    /// into their own「置顶」section.
     var displayProjects: [WorkspaceProject] {
-        let base: [WorkspaceProject]
         switch sortOrder {
         case .manual:
-            base = projects
+            return projects
         case .name:
-            base = projects.sorted {
+            return projects.sorted {
                 $0.name.localizedStandardCompare($1.name) == .orderedAscending
             }
         case .recent:
-            base = projects.sorted {
+            return projects.sorted {
                 ($0.lastUsedAt ?? .distantPast) > ($1.lastUsedAt ?? .distantPast)
             }
         }
-        return base.filter(\.pinned) + base.filter { !$0.pinned }
     }
 
     func togglePin(_ project: WorkspaceProject) {
@@ -1423,10 +1422,13 @@ struct WorkspaceSidebarView: View {
         }
     }
 
+    private var pinnedProjects: [WorkspaceProject] { visibleProjects.filter(\.pinned) }
+    private var normalProjects: [WorkspaceProject] { visibleProjects.filter { !$0.pinned } }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Text("项目")
+                Text("工作区")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.secondary)
                 Spacer()
@@ -1534,21 +1536,16 @@ struct WorkspaceSidebarView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(visibleProjects.enumerated()), id: \.element.id) { index, project in
-                            if index > 0 {
-                                // 项目组之间的分隔:淡线 + 留白,按组分隔比固定
-                                // 数量分隔更贴合内容结构。
-                                Divider()
-                                    .opacity(0.4)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 5)
+                        // 置顶项目独立成组(仿 Codex)。
+                        if !pinnedProjects.isEmpty {
+                            sectionLabel("置顶")
+                            projectRows(pinnedProjects)
+                            if !normalProjects.isEmpty {
+                                sectionLabel("项目")
+                                    .padding(.top, 8)
                             }
-                            WorkspaceProjectSection(
-                                project: project,
-                                state: state,
-                                controller: controller,
-                                searchQuery: query)
                         }
+                        projectRows(normalProjects)
                     }
                     .padding(.horizontal, 8)
                     .padding(.bottom, 8)
@@ -1566,6 +1563,35 @@ struct WorkspaceSidebarView: View {
                 .padding(4)
                 .opacity(isDropTargeted ? 1 : 0)
         )
+    }
+
+    /// 分组小标题(置顶 / 项目)。
+    private func sectionLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10.5, weight: .semibold))
+            .foregroundColor(Color.secondary.opacity(0.85))
+            .padding(.horizontal, 8)
+            .padding(.bottom, 3)
+    }
+
+    /// 一组项目行(组内含分隔线)。
+    @ViewBuilder
+    private func projectRows(_ list: [WorkspaceProject]) -> some View {
+        ForEach(Array(list.enumerated()), id: \.element.id) { index, project in
+            if index > 0 {
+                // 项目组之间的分隔:淡线 + 留白,按组分隔比固定
+                // 数量分隔更贴合内容结构。
+                Divider()
+                    .opacity(0.4)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+            }
+            WorkspaceProjectSection(
+                project: project,
+                state: state,
+                controller: controller,
+                searchQuery: query)
+        }
     }
 
     /// Accept folders dragged from Finder and add them as projects.
