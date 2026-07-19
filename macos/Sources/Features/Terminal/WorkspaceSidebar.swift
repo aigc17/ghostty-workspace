@@ -1750,23 +1750,40 @@ struct WorkspaceProjectSection: View {
                 Button(project.pinned ? "取消置顶" : "置顶项目") {
                     ProjectManager.shared.togglePin(project)
                 }
-                Menu("标签") {
-                    ForEach(WorkspaceColorTag.allCases, id: \.self) { tag in
-                        Button {
-                            project.colorTag = tag.rawValue
-                            ProjectManager.shared.save()
-                        } label: {
-                            Label {
-                                Text(tag.title)
-                            } icon: {
-                                Image(nsImage: tag.menuImage)
+                if #available(macOS 14.0, *) {
+                    // Finder 式一排颜色圆点:点击选中,再点同色取消。
+                    ControlGroup {
+                        ForEach(WorkspaceColorTag.allCases) { tag in
+                            Button {
+                                if project.colorTag == tag.rawValue {
+                                    project.colorTag = nil
+                                } else {
+                                    project.colorTag = tag.rawValue
+                                }
+                                ProjectManager.shared.save()
+                            } label: {
+                                Image(systemName: project.colorTag == tag.rawValue
+                                    ? "checkmark.circle.fill"
+                                    : "circle.fill")
                             }
+                            .tint(tag.color)
+                            .help(tag.title)
                         }
                     }
-                    Divider()
-                    Button("移除标签") {
-                        project.colorTag = nil
-                        ProjectManager.shared.save()
+                    .controlGroupStyle(.palette)
+                } else {
+                    Menu("标签") {
+                        ForEach(WorkspaceColorTag.allCases, id: \.self) { tag in
+                            Button(tag.title) {
+                                project.colorTag = tag.rawValue
+                                ProjectManager.shared.save()
+                            }
+                        }
+                        Divider()
+                        Button("移除标签") {
+                            project.colorTag = nil
+                            ProjectManager.shared.save()
+                        }
                     }
                 }
                 Divider()
