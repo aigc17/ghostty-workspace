@@ -47,6 +47,11 @@ class WorkspaceSession: ObservableObject, Identifiable {
         self.workingDirectory = workingDirectory
     }
 
+    func matches(_ query: String) -> Bool {
+        title.localizedCaseInsensitiveContains(query)
+            || (primarySurface?.title.localizedCaseInsensitiveContains(query) ?? false)
+    }
+
     /// Sync the stored title from the live surface, e.g. before persisting.
     /// User-renamed sessions keep their custom title.
     func syncTitle() {
@@ -124,12 +129,46 @@ class WorkspaceProject: ObservableObject, Identifiable {
     /// Finder 式颜色标签(WorkspaceColorTag rawValue),nil 为无标签。
     @Published var colorTag: String? = nil
 
+    /// 最近一次使用(激活其下对话)的时间,用于「最近使用」排序。
+    @Published var lastUsedAt: Date? = nil
+
+    func matches(_ query: String) -> Bool {
+        name.localizedCaseInsensitiveContains(query)
+            || path.localizedCaseInsensitiveContains(query)
+    }
+
     init(id: UUID = UUID(), name: String, path: String, sessions: [WorkspaceSession] = []) {
         self.id = id
         self.name = name
         self.path = path
         self.sessions = sessions
     }
+}
+
+/// 项目列表排序方式。
+enum WorkspaceProjectSort: String, CaseIterable, Identifiable {
+    case manual, name, recent
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .manual: return "默认顺序"
+        case .name: return "按名称"
+        case .recent: return "最近使用"
+        }
+    }
+}
+
+/// 搜索命中高亮:命中片段染成强调色并加粗。
+func workspaceHighlight(_ string: String, query: String) -> Text {
+    guard !query.isEmpty else { return Text(string) }
+    var attr = AttributedString(string)
+    if let range = attr.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) {
+        attr[range].foregroundColor = .accentColor
+        attr[range].font = .system(size: 12, weight: .bold)
+    }
+    return Text(attr)
 }
 
 /// Per-window sidebar UI state.
@@ -151,6 +190,10 @@ class ProjectManager: ObservableObject {
     }
 
     private init() {
+        if let raw = UserDefaults.standard.string(forKey: "WorkspaceProjectSortOrder"),
+           let sort = WorkspaceProjectSort(rawValue: raw) {
+            sortOrder = sort
+        }
         load()
         NotificationCenter.default.addObserver(
             self,
@@ -167,15 +210,38 @@ class ProjectManager: ObservableObject {
         projects.flatMap { $0.sessions }
     }
 
-    /// Sidebar display order: pinned projects first, original order otherwise.
+    /// 项目排序方式,持久化到 UserDefaults。
+    @Published var sortOrder: WorkspaceProjectSort = .manual {
+        didSet { UserDefaults.standard.set(sortOrder.rawValue, forKey: "WorkspaceProjectSortOrder") }
+    }
+
+    /// Sidebar display order: pinned projects first, then the chosen sort.
     var displayProjects: [WorkspaceProject] {
-        projects.filter(\.pinned) + projects.filter { !$0.pinned }
+        let base: [WorkspaceProject]
+        switch sortOrder {
+        case .manual:
+            base = projects
+        case .name:
+            base = projects.sorted {
+                $0.name.localizedStandardCompare($1.name) == .orderedAscending
+            }
+        case .recent:
+            base = projects.sorted {
+                ($0.lastUsedAt ?? .distantPast) > ($1.lastUsedAt ?? .distantPast)
+            }
+        }
+        return base.filter(\.pinned) + base.filter { !$0.pinned }
     }
 
     func togglePin(_ project: WorkspaceProject) {
         objectWillChange.send()
         project.pinned.toggle()
         save()
+    }
+
+    /// Stamp the project containing a session as recently used.
+    func touchProject(containing session: WorkspaceSession) {
+        project(containing: session)?.lastUsedAt = Date()
     }
 
     func project(containing session: WorkspaceSession) -> WorkspaceProject? {
@@ -277,6 +343,7 @@ class ProjectManager: ObservableObject {
         var path: String
         var pinned: Bool?
         var colorTag: String?
+        var lastUsedAt: Date?
         var sessions: [SessionDTO]
     }
 
@@ -291,6 +358,7 @@ class ProjectManager: ObservableObject {
                 path: project.path,
                 pinned: project.pinned ? true : nil,
                 colorTag: project.colorTag,
+                lastUsedAt: project.lastUsedAt,
                 sessions: project.sessions.map { session in
                     SessionDTO(
                         id: session.id,
@@ -318,6 +386,7 @@ class ProjectManager: ObservableObject {
             let project = WorkspaceProject(id: pd.id, name: pd.name, path: pd.path)
             project.pinned = pd.pinned ?? false
             project.colorTag = pd.colorTag
+            project.lastUsedAt = pd.lastUsedAt
             project.sessions = pd.sessions.map { sd in
                 let session = WorkspaceSession(
                     id: sd.id,
@@ -512,6 +581,7 @@ extension TerminalController {
         activeWorkspaceSession = session
         workspaceState.activeSessionID = session.id
         session.hasUnread = false
+        ProjectManager.shared.touchProject(containing: session)
         surfaceTree = tree
 
         if let view = Array(tree).first {
@@ -1337,6 +1407,22 @@ struct WorkspaceSidebarView: View {
     /// True while a folder drag hovers over the sidebar.
     @State private var isDropTargeted = false
 
+    /// 搜索关键字(项目名/路径/对话标题)。
+    @State private var searchText = ""
+
+    private var query: String {
+        searchText.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// 排序 + 搜索过滤后的展示列表。
+    private var visibleProjects: [WorkspaceProject] {
+        let base = manager.displayProjects
+        guard !query.isEmpty else { return base }
+        return base.filter { project in
+            project.matches(query) || project.sessions.contains { $0.matches(query) }
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
@@ -1344,6 +1430,25 @@ struct WorkspaceSidebarView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.secondary)
                 Spacer()
+                Menu {
+                    ForEach(WorkspaceProjectSort.allCases) { sort in
+                        Button {
+                            manager.sortOrder = sort
+                        } label: {
+                            if manager.sortOrder == sort {
+                                Label(sort.title, systemImage: "checkmark")
+                            } else {
+                                Text(sort.title)
+                            }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "arrow.up.arrow.down")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("排序方式")
                 Button {
                     guard let controller else { return }
                     if WorkspaceClaudeIntegration.isConfigured() {
@@ -1382,6 +1487,29 @@ struct WorkspaceSidebarView: View {
             .padding(.top, 10)
             .padding(.bottom, 6)
 
+            // 搜索框
+            HStack(spacing: 5) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                TextField("搜索项目 / 对话", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                if !searchText.isEmpty {
+                    Button { searchText = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 5)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.07)))
+            .padding(.horizontal, 10)
+            .padding(.bottom, 6)
+
             if manager.projects.isEmpty {
                 Spacer()
                 VStack(spacing: 8) {
@@ -1397,10 +1525,16 @@ struct WorkspaceSidebarView: View {
                     .font(.system(size: 12))
                 }
                 Spacer()
+            } else if visibleProjects.isEmpty {
+                Spacer()
+                Text("无匹配结果")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                Spacer()
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(manager.displayProjects.enumerated()), id: \.element.id) { index, project in
+                        ForEach(Array(visibleProjects.enumerated()), id: \.element.id) { index, project in
                             if index > 0 {
                                 // 项目组之间的分隔:淡线 + 留白,按组分隔比固定
                                 // 数量分隔更贴合内容结构。
@@ -1412,7 +1546,8 @@ struct WorkspaceSidebarView: View {
                             WorkspaceProjectSection(
                                 project: project,
                                 state: state,
-                                controller: controller)
+                                controller: controller,
+                                searchQuery: query)
                         }
                     }
                     .padding(.horizontal, 8)
@@ -1489,7 +1624,21 @@ struct WorkspaceProjectSection: View {
     @ObservedObject var state: WorkspaceState
     weak var controller: TerminalController?
 
+    /// 搜索关键字;非空时区块强制展开并只显示命中的对话。
+    var searchQuery: String = ""
+
     @State private var hovered = false
+
+    private var isExpanded: Bool {
+        searchQuery.isEmpty ? project.expanded : true
+    }
+
+    private var visibleSessions: [WorkspaceSession] {
+        guard !searchQuery.isEmpty else { return project.sessions }
+        // 项目本身命中则显示全部对话,否则只显示命中的对话。
+        if project.matches(searchQuery) { return project.sessions }
+        return project.sessions.filter { $0.matches(searchQuery) }
+    }
 
     /// 颜色标签对应的填充色;无标签时按悬停态取灰调。
     private var folderColor: Color {
@@ -1505,12 +1654,12 @@ struct WorkspaceProjectSection: View {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundColor(.secondary)
-                    .rotationEffect(.degrees(project.expanded ? 90 : 0))
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
                     .frame(width: 10)
                 Image(systemName: "folder.fill")
                     .font(.system(size: 12.5))
                     .foregroundColor(folderColor)
-                Text(project.name)
+                workspaceHighlight(project.name, query: searchQuery)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(.primary)
                     .lineLimit(1)
@@ -1616,19 +1765,20 @@ struct WorkspaceProjectSection: View {
                 Button("移除项目(关闭其所有对话)") { controller?.removeWorkspaceProject(project) }
             }
 
-            if project.expanded {
-                if project.sessions.isEmpty {
+            if isExpanded {
+                if visibleSessions.isEmpty {
                     Text("无对话")
                         .font(.system(size: 12))
                         .foregroundColor(Color.secondary.opacity(0.6))
                         .padding(.leading, 32)
                         .padding(.vertical, 2)
                 } else {
-                    ForEach(project.sessions) { session in
+                    ForEach(visibleSessions) { session in
                         WorkspaceSessionRow(
                             session: session,
                             state: state,
-                            controller: controller)
+                            controller: controller,
+                            searchQuery: searchQuery)
                     }
                 }
             }
@@ -1641,6 +1791,9 @@ struct WorkspaceSessionRow: View {
     @ObservedObject var session: WorkspaceSession
     @ObservedObject var state: WorkspaceState
     weak var controller: TerminalController?
+
+    /// 搜索关键字,用于标题命中高亮。
+    var searchQuery: String = ""
 
     @State private var hovered = false
 
@@ -1657,7 +1810,7 @@ struct WorkspaceSessionRow: View {
             Image(systemName: "terminal")
                 .font(.system(size: 9.5))
                 .foregroundColor(isActive || hovered ? .primary : Color.secondary.opacity(0.75))
-            WorkspaceSessionTitle(session: session)
+            WorkspaceSessionTitle(session: session, searchQuery: searchQuery)
                 .foregroundColor(isActive || hovered ? .primary : .secondary)
             Spacer()
             if hovered {
@@ -1782,11 +1935,13 @@ struct WorkspaceUnreadDot: View {
 struct WorkspaceSessionTitle: View {
     @ObservedObject var session: WorkspaceSession
 
+    var searchQuery: String = ""
+
     var body: some View {
         if !session.userRenamed, let surface = session.primarySurface {
-            WorkspaceSurfaceTitle(surface: surface, fallback: session.title)
+            WorkspaceSurfaceTitle(surface: surface, fallback: session.title, searchQuery: searchQuery)
         } else {
-            Text(session.title)
+            workspaceHighlight(session.title, query: searchQuery)
                 .font(.system(size: 12))
                 .lineLimit(1)
         }
@@ -1797,8 +1952,10 @@ struct WorkspaceSurfaceTitle: View {
     @ObservedObject var surface: Ghostty.SurfaceView
     let fallback: String
 
+    var searchQuery: String = ""
+
     var body: some View {
-        Text(surface.title.isEmpty ? fallback : surface.title)
+        workspaceHighlight(surface.title.isEmpty ? fallback : surface.title, query: searchQuery)
             .font(.system(size: 12))
             .lineLimit(1)
     }
