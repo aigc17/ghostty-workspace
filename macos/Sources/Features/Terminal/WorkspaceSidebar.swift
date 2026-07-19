@@ -1149,12 +1149,18 @@ struct WorkspaceTagPicker: View {
     }
 
     private func tagButton(_ tag: WorkspaceColorTag) -> some View {
-        Button {
-            set(project.colorTag == tag.rawValue ? nil : tag.rawValue)
+        let selected = project.colorTag == tag.rawValue
+        return Button {
+            set(selected ? nil : tag.rawValue)
         } label: {
-            Image(systemName: project.colorTag == tag.rawValue
-                ? "checkmark.circle.fill"
-                : "circle.fill")
+            if selected {
+                // 白色对勾 + 标签色圆底。
+                Image(systemName: "checkmark.circle.fill")
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(Color.white, tag.color)
+            } else {
+                Image(systemName: "circle.fill")
+            }
         }
         .tint(tag.color)
         .help(tag.title)
