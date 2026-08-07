@@ -1642,23 +1642,48 @@ final class WorkspaceMenuAction: NSObject {
 /// 点击时即时构建并弹出 Agent 菜单(AppKit)。不给每个项目行常驻
 /// SwiftUI Menu 适配器:行多时适配器反复重建菜单项会拖垮主线程。
 enum WorkspaceAgentMenuPresenter {
+    /// 项目行入口:选中后在该项目下新开对话并执行启动命令。
     static func present(for project: WorkspaceProject, controller: TerminalController?) {
+        popUp(controller: controller) { [weak controller] input in
+            controller?.newWorkspaceSession(in: project, initialInput: input)
+        }
+    }
+
+    /// 终端标签栏入口:选中后直接在该终端里键入命令执行。
+    static func present(for surface: Ghostty.SurfaceView) {
+        let controller = surface.window?.windowController as? TerminalController
+        popUp(controller: controller) { [weak surface] input in
+            // 菜单回调是 nonisolated 上下文,sendText 是 MainActor 隔离,
+            // 显式跳回主线程。
+            DispatchQueue.main.async {
+                guard let surface else { return }
+                // sendText 走 pty 原始输入:回车必须是 \r,\n 只会落成文本。
+                surface.surfaceModel?.sendText(input.replacingOccurrences(of: "\n", with: "\r"))
+                Ghostty.moveFocus(to: surface)
+            }
+        }
+    }
+
+    /// 组装菜单:内置 + 自定义 + 添加/删除入口。`launch` 决定命令去向
+    /// (新开对话 or 当前终端)。
+    private static func popUp(
+        controller: TerminalController?,
+        launch: @escaping (String) -> Void
+    ) {
         let menu = NSMenu()
 
-        func launch(_ title: String, _ image: NSImage, _ input: String) {
-            menu.addItem(item(title, image: image) { [weak controller] in
-                controller?.newWorkspaceSession(in: project, initialInput: input)
-            })
+        func add(_ title: String, _ image: NSImage?, _ input: String) {
+            menu.addItem(item(title, image: image) { launch(input) })
         }
 
         for agent in WorkspaceAgentLauncher.allCases {
-            launch(agent.title, agent.menuImage(), agent.launchInput)
+            add(agent.title, agent.menuImage(), agent.launchInput)
         }
         let custom = WorkspaceAgentStore.shared.custom
         if !custom.isEmpty {
             menu.addItem(.separator())
             for agent in custom {
-                launch(agent.title, agent.menuImage(), agent.command + "\n")
+                add(agent.title, agent.menuImage(), agent.command + "\n")
             }
         }
         menu.addItem(.separator())
@@ -1892,6 +1917,18 @@ struct WorkspacePaneHeader: View {
                 .lineLimit(1)
                 .foregroundColor(.secondary)
             Spacer(minLength: 0)
+            // Agent 快捷启动:弹菜单选中后直接在当前终端执行启动命令。
+            Button {
+                WorkspaceAgentMenuPresenter.present(for: surface)
+            } label: {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 10))
+                    .foregroundColor(hovered ? .primary : Color.secondary.opacity(0.5))
+                    .frame(width: 16, height: 16)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("快捷启动 AI Agent(在此终端执行)")
             if hovered {
                 HStack(spacing: 9) {
                     Button { split(.right) } label: {
