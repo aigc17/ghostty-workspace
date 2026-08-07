@@ -2517,21 +2517,21 @@ struct WorkspaceProjectSection: View {
                         .help("已置顶")
                 }
                 Spacer()
-                // Agent 快捷启动:常驻标签(低调),点击即时弹出 AppKit
-                // 菜单选 Agent,在该项目下新开对话并执行启动命令。
-                Button {
-                    WorkspaceAgentMenuPresenter.present(for: project, controller: controller)
-                } label: {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 10.5))
-                        .foregroundColor(hovered ? .primary : Color.secondary.opacity(0.45))
-                        .frame(width: 18, height: 18)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("快捷启动 AI Agent")
-                // 新建对话仍只在悬停时出现,减少静态视觉噪声。
+                // 行内动作只在悬停时出现,静态视觉零噪声。
                 if hovered {
+                    // Agent 快捷启动:点击即时弹出 AppKit 菜单选 Agent,
+                    // 在该项目下新开对话并执行启动命令。
+                    Button {
+                        WorkspaceAgentMenuPresenter.present(for: project, controller: controller)
+                    } label: {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 10.5))
+                            .foregroundColor(.primary)
+                            .frame(width: 18, height: 18)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("快捷启动 AI Agent")
                     Button { controller?.newWorkspaceSession(in: project) } label: {
                         Image(systemName: "plus")
                             .font(.system(size: 11))
