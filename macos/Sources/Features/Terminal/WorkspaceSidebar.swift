@@ -1644,35 +1644,46 @@ final class WorkspaceMenuAction: NSObject {
 enum WorkspaceAgentMenuPresenter {
     /// 项目行入口:选中后在该项目下新开对话并执行启动命令。
     static func present(for project: WorkspaceProject, controller: TerminalController?) {
-        popUp(controller: controller) { [weak controller] input in
+        buildMenu(controller: controller) { [weak controller] input in
             controller?.newWorkspaceSession(in: project, initialInput: input)
-        }
+        }.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 
     /// 终端标签栏入口:选中后直接在该终端里键入命令执行。
     static func present(for surface: Ghostty.SurfaceView) {
+        submenu(for: surface).popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+
+    /// 终端右键菜单入口:同一套菜单挂为子菜单,命令在该终端执行。
+    static func submenu(for surface: Ghostty.SurfaceView) -> NSMenu {
         let controller = surface.window?.windowController as? TerminalController
-        popUp(controller: controller) { [weak surface] input in
-            // 菜单回调是 nonisolated 上下文,sendText 是 MainActor 隔离,
-            // 显式跳回主线程。
-            DispatchQueue.main.async {
-                guard let surface, let model = surface.surfaceModel else { return }
-                // sendText 是「文字插入」通道,\n/\r 不会被编码成回车键;
-                // 命令正文走文本,回车必须补一对 Enter 键事件才会执行。
-                model.sendText(input.trimmingCharacters(in: .newlines))
-                model.sendKeyEvent(.init(key: .enter))
-                model.sendKeyEvent(.init(key: .enter, action: .release))
-                Ghostty.moveFocus(to: surface)
-            }
+        return buildMenu(controller: controller) { [weak surface] input in
+            guard let surface else { return }
+            run(input, in: surface)
+        }
+    }
+
+    /// 在指定终端里执行启动命令。
+    private static func run(_ input: String, in surface: Ghostty.SurfaceView) {
+        // 菜单回调是 nonisolated 上下文,sendText 是 MainActor 隔离,
+        // 显式跳回主线程。
+        DispatchQueue.main.async {
+            guard let model = surface.surfaceModel else { return }
+            // sendText 是「文字插入」通道,\n/\r 不会被编码成回车键;
+            // 命令正文走文本,回车必须补一对 Enter 键事件才会执行。
+            model.sendText(input.trimmingCharacters(in: .newlines))
+            model.sendKeyEvent(.init(key: .enter))
+            model.sendKeyEvent(.init(key: .enter, action: .release))
+            Ghostty.moveFocus(to: surface)
         }
     }
 
     /// 组装菜单:内置 + 自定义 + 添加/删除入口。`launch` 决定命令去向
     /// (新开对话 or 当前终端)。
-    private static func popUp(
+    private static func buildMenu(
         controller: TerminalController?,
         launch: @escaping (String) -> Void
-    ) {
+    ) -> NSMenu {
         let menu = NSMenu()
 
         func add(_ title: String, _ image: NSImage?, _ input: String) {
@@ -1707,7 +1718,7 @@ enum WorkspaceAgentMenuPresenter {
             menu.addItem(holder)
         }
 
-        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        return menu
     }
 
     private static func item(

@@ -1372,6 +1372,12 @@ extension Ghostty {
             }
             menu.addItem(withTitle: "Paste", action: #selector(paste(_:)), keyEquivalent: "")
 
+            // Workspace:Agent 快捷启动子菜单,命令直接在本终端执行。
+            menu.addItem(.separator())
+            item = menu.addItem(withTitle: "快捷启动 AI Agent", action: nil, keyEquivalent: "")
+            item.setImageIfDesired(systemSymbolName: "sparkles")
+            item.submenu = WorkspaceAgentMenuPresenter.submenu(for: self)
+
             menu.addItem(.separator())
             item = menu.addItem(withTitle: "Split Right", action: #selector(splitRight(_:)), keyEquivalent: "")
             item.setImageIfDesired(systemSymbolName: "rectangle.righthalf.inset.filled")
