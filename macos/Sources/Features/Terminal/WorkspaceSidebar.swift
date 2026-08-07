@@ -1539,9 +1539,15 @@ enum WorkspaceAgentLauncher: String, CaseIterable, Identifiable {
     }
 }
 
+/// 记号位图缓存:菜单每次求值都拿到全新 NSImage 会让 SwiftUI 菜单
+/// 适配器反复重建菜单项(项目一多会拖垮主线程),稳定实例是硬要求。
+private var workspaceAgentBadgeCache: [String: NSImage] = [:]
+
 /// 记号位图:彩圆底 + 白色字符。菜单会剥离符号配色,自绘位图不受
 /// 影响(同 WorkspaceColorTag.menuImage)。内置与自定义 Agent 共用。
 func workspaceAgentBadgeImage(glyph: String, color: NSColor) -> NSImage {
+    let key = "\(glyph)#\(color.description)"
+    if let cached = workspaceAgentBadgeCache[key] { return cached }
     let image = NSImage(size: .init(width: 16, height: 16), flipped: false) { rect in
         color.setFill()
         NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1)).fill()
@@ -1554,7 +1560,80 @@ func workspaceAgentBadgeImage(glyph: String, color: NSColor) -> NSImage {
         return true
     }
     image.isTemplate = false
+    workspaceAgentBadgeCache[key] = image
     return image
+}
+
+/// 闭包式 NSMenuItem 的 target 蹦床(NSMenuItem 只认 target/action)。
+final class WorkspaceMenuAction: NSObject {
+    private let handler: () -> Void
+
+    init(_ handler: @escaping () -> Void) {
+        self.handler = handler
+    }
+
+    @objc func run(_ sender: Any?) { handler() }
+}
+
+/// 点击时即时构建并弹出 Agent 菜单(AppKit)。不给每个项目行常驻
+/// SwiftUI Menu 适配器:行多时适配器反复重建菜单项会拖垮主线程。
+enum WorkspaceAgentMenuPresenter {
+    static func present(for project: WorkspaceProject, controller: TerminalController?) {
+        let menu = NSMenu()
+
+        func launch(_ title: String, _ image: NSImage, _ input: String) {
+            menu.addItem(item(title, image: image) { [weak controller] in
+                controller?.newWorkspaceSession(in: project, initialInput: input)
+            })
+        }
+
+        for agent in WorkspaceAgentLauncher.allCases {
+            launch(agent.title, agent.menuImage(), agent.launchInput)
+        }
+        let custom = WorkspaceAgentStore.shared.custom
+        if !custom.isEmpty {
+            menu.addItem(.separator())
+            for agent in custom {
+                launch(agent.title, agent.menuImage(), agent.command + "\n")
+            }
+        }
+        menu.addItem(.separator())
+        menu.addItem(item("添加自定义 Agent…", image: nil) { [weak controller] in
+            controller?.promptNewWorkspaceAgent { title, command in
+                WorkspaceAgentStore.shared.add(title: title, command: command)
+            }
+        })
+        if !custom.isEmpty {
+            let submenu = NSMenu()
+            for agent in custom {
+                submenu.addItem(item(agent.title, image: agent.menuImage()) {
+                    WorkspaceAgentStore.shared.remove(agent)
+                })
+            }
+            let holder = NSMenuItem(title: "删除自定义 Agent", action: nil, keyEquivalent: "")
+            holder.submenu = submenu
+            menu.addItem(holder)
+        }
+
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+
+    private static func item(
+        _ title: String,
+        image: NSImage?,
+        handler: @escaping () -> Void
+    ) -> NSMenuItem {
+        let action = WorkspaceMenuAction(handler)
+        let item = NSMenuItem(
+            title: title,
+            action: #selector(WorkspaceMenuAction.run(_:)),
+            keyEquivalent: "")
+        item.target = action
+        // NSMenuItem 不持有 target,借 representedObject 保活闭包蹦床。
+        item.representedObject = action
+        item.image = image
+        return item
+    }
 }
 
 /// 自定义 Agent:用户添加的「名称 + 启动命令」,后续新 AI CLI 无需改代码。
@@ -2331,10 +2410,10 @@ struct WorkspaceProjectSection: View {
                         .help("已置顶")
                 }
                 Spacer()
-                // Agent 快捷启动:常驻标签(低调),点开选 Agent 即在该
-                // 项目下新开对话并执行启动命令。
-                Menu {
-                    WorkspaceAgentMenuItems(project: project, controller: controller)
+                // Agent 快捷启动:常驻标签(低调),点击即时弹出 AppKit
+                // 菜单选 Agent,在该项目下新开对话并执行启动命令。
+                Button {
+                    WorkspaceAgentMenuPresenter.present(for: project, controller: controller)
                 } label: {
                     Image(systemName: "sparkles")
                         .font(.system(size: 10.5))
@@ -2342,9 +2421,7 @@ struct WorkspaceProjectSection: View {
                         .frame(width: 18, height: 18)
                         .contentShape(Rectangle())
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
+                .buttonStyle(.plain)
                 .help("快捷启动 AI Agent")
                 // 新建对话仍只在悬停时出现,减少静态视觉噪声。
                 if hovered {

@@ -16,6 +16,12 @@
 - **解决**:加 `-Dversion-string=1.2.3` 跳过 git 版本探测(已写入上方构建命令)
 - **教训**:fork 仓库构建一律显式传 version-string
 
+### 2026-08-07 每行常驻 SwiftUI Menu 拖垮主线程(App 卡死)
+- **现象**:侧边栏加 Agent 快捷启动菜单后 App 卡死,sample 显示主线程 100% 在 AppKitPopUpAdaptor.updateNSView → 菜单项无障碍描述解析
+- **根因**:每个项目行常驻一个 SwiftUI Menu,且菜单项图标每次求值都新建 NSImage → SwiftUI 认为菜单变了,每次重绘全量重建 N 个菜单的全部菜单项(SF Symbol 无障碍解析很贵)
+- **解决**:①记号位图加全局缓存保证实例稳定;②行内菜单改为普通按钮,点击时 AppKit 即时构建 NSMenu 弹出(WorkspaceAgentMenuPresenter)
+- **教训**:列表行里绝不常驻 SwiftUI Menu;喂给菜单的 NSImage 必须缓存稳定实例
+
 ### 2026-08-07 Xcode 16.0 不支持参数尾随逗号
 - **现象**:App Intents 数个文件报 `unexpected ',' separator`
 - **根因**:上游代码用了 Swift 6.1(Xcode 16.3+)的参数列表尾随逗号语法,本机 Xcode 16.0 是 Swift 6.0
