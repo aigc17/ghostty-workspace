@@ -22,6 +22,12 @@
 - **解决**:①记号位图加全局缓存保证实例稳定;②行内菜单改为普通按钮,点击时 AppKit 即时构建 NSMenu 弹出(WorkspaceAgentMenuPresenter)
 - **教训**:列表行里绝不常驻 SwiftUI Menu;喂给菜单的 NSImage 必须缓存稳定实例
 
+### 2026-08-07 sendText 发 \n/\r 不执行命令
+- **现象**:向已有终端 sendText("claude\n") 只上屏不执行;换 \r 变成输入框里的换行
+- **根因**:ghostty_surface_text 是「文字插入/粘贴」通道,shell 的 bracketed paste 会把粘贴内的回车显示成换行且不执行
+- **解决**:命令正文走 sendText(去掉换行),回车用 sendKeyEvent(.enter) press+release 一对真按键
+- **教训**:向终端注入「执行」动作,回车必须走 key 事件通道,不能混在文本里
+
 ### 2026-08-07 Xcode 16.0 不支持参数尾随逗号
 - **现象**:App Intents 数个文件报 `unexpected ',' separator`
 - **根因**:上游代码用了 Swift 6.1(Xcode 16.3+)的参数列表尾随逗号语法,本机 Xcode 16.0 是 Swift 6.0
