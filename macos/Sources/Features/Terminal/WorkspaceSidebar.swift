@@ -46,6 +46,10 @@ class WorkspaceSession: ObservableObject, Identifiable {
     /// (e.g. an AI CLI finished) that the user hasn't viewed yet.
     @Published var hasUnread: Bool = false
 
+    /// 拖拽并入其他布局后的主 surface id:行保留在侧边栏,点击聚焦
+    /// 那个分区;分区关闭后回退为普通记录行。不跨启动持久化。
+    @Published var dockedSurfaceID: UUID? = nil
+
     var primarySurface: Ghostty.SurfaceView? {
         guard let tree else { return nil }
         return Array(tree).first
@@ -596,6 +600,20 @@ extension TerminalController {
     /// created shell (e.g. "claude --continue\n" to resume an AI conversation);
     /// ignored when the session already has a live tree.
     func activateWorkspaceSession(_ session: WorkspaceSession, initialInput: String? = nil) {
+        // 已并入某个分屏布局的会话:聚焦那个分区,而不是再开一份。
+        if session.tree == nil, let dockedID = session.dockedSurfaceID {
+            if let owner = TerminalController.all.first(where: { $0.surfaceTree.find(id: dockedID) != nil }),
+               let node = owner.surfaceTree.find(id: dockedID),
+               case .leaf(let view) = node {
+                owner.window?.makeKeyAndOrderFront(nil)
+                owner.focusedSurface = view
+                Ghostty.moveFocus(to: view)
+                session.hasUnread = false
+                return
+            }
+            // 那个分区已经关闭:退化为普通记录行,走常规激活。
+            session.dockedSurfaceID = nil
+        }
         if activeWorkspaceSession === session { return }
 
         // If the session is already shown in another window, focus that window.
@@ -795,6 +813,34 @@ extension TerminalController {
         }
     }
 
+    /// 添加自定义 Agent 的弹窗:名称 + 启动命令两个输入框。
+    func promptNewWorkspaceAgent(completion: @escaping (String, String) -> Void) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "添加自定义 Agent"
+        alert.informativeText = "启动命令会在新终端就绪后自动执行。"
+        alert.addButton(withTitle: "添加")
+        alert.addButton(withTitle: "取消")
+
+        let nameField = NSTextField(frame: .init(x: 0, y: 32, width: 260, height: 24))
+        nameField.placeholderString = "名称(如 Codex)"
+        let commandField = NSTextField(frame: .init(x: 0, y: 0, width: 260, height: 24))
+        commandField.placeholderString = "启动命令(如 codex)"
+        let container = NSView(frame: .init(x: 0, y: 0, width: 260, height: 56))
+        container.addSubview(nameField)
+        container.addSubview(commandField)
+        alert.accessoryView = container
+        alert.window.initialFirstResponder = nameField
+
+        alert.beginSheetModal(for: window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            let title = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let command = commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty, !command.isEmpty else { return }
+            completion(title, command)
+        }
+    }
+
     /// Prompt for a directory and add it as a project.
     func promptNewWorkspaceProject() {
         guard let window else { return }
@@ -885,13 +931,15 @@ extension TerminalController {
 
         guard let newTree = workspaceInserting(merged, into: surfaceTree, at: target) else { return }
 
-        // The dragged session's terminals now live in this session's layout.
+        // 终端并入本窗口布局,但侧边栏行保留:行记住主 surface,
+        // 点击可聚焦那个分区(对话不会从文件树里消失)。
+        session.syncTitle()
         session.tree = nil
-        ProjectManager.shared.removeSession(session)
         undoManager?.removeAllActions(withTarget: self)
 
         surfaceTree = newTree
         let focusView = merged.leftmostLeaf()
+        session.dockedSurfaceID = focusView.id
         focusedSurface = focusView
         Ghostty.moveFocus(to: focusView)
         ProjectManager.shared.save()
@@ -918,13 +966,18 @@ extension TerminalController {
         let frame = state.terminalFrame
         let local = CGPoint(x: rootLocation.x - frame.minX, y: rootLocation.y - frame.minY)
         state.location = local
+        state.rootLocation = rootLocation
 
         // 悬停在侧边栏上方:解析为「排序」落点,与终端区停靠互斥。
         if state.sidebarFrame.contains(rootLocation),
            let reorder = resolveWorkspaceReorder(payload: payload, at: rootLocation) {
             if state.target != nil { state.target = nil }
             if state.highlight != nil { state.highlight = nil }
-            if state.reorderTarget != reorder.target { state.reorderTarget = reorder.target }
+            if state.reorderTarget != reorder.target {
+                state.reorderTarget = reorder.target
+                // 落点切换时的触觉反馈:拖拽有「吸附」手感。
+                NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+            }
             if state.reorderIndicatorY != reorder.indicatorY { state.reorderIndicatorY = reorder.indicatorY }
             return
         }
@@ -934,7 +987,12 @@ extension TerminalController {
         // Single spatial pass per event; publish only actual changes.
         let (target, highlight) = WorkspaceDockResolver.resolve(
             at: local, size: frame.size, tree: surfaceTree)
-        if state.target != target { state.target = target }
+        if state.target != target {
+            state.target = target
+            if target != nil {
+                NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+            }
+        }
         if state.highlight != highlight { state.highlight = highlight }
     }
 
@@ -1186,6 +1244,9 @@ final class WorkspaceDragState: ObservableObject {
     @Published var label: String = ""
     /// Cursor location in the terminal area's local coordinates.
     @Published var location: CGPoint = .zero
+    /// Cursor location in the workspace root space: the floating chip is
+    /// drawn at root level so it stays visible over the sidebar too.
+    @Published var rootLocation: CGPoint = .zero
     /// Resolved dock target under the cursor.
     @Published var target: WorkspaceDockTarget? = nil
     /// Highlight rect in the terminal area's local coordinates.
@@ -1472,40 +1533,123 @@ enum WorkspaceAgentLauncher: String, CaseIterable, Identifiable {
         }
     }
 
-    /// 菜单用品牌记号位图:彩圆底 + 白色记号字符。菜单会剥离符号
-    /// 配色,自绘位图不受影响(同 WorkspaceColorTag.menuImage)。
+    /// 菜单用品牌记号位图。
     func menuImage() -> NSImage {
-        let image = NSImage(size: .init(width: 16, height: 16), flipped: false) { rect in
-            self.nsColor.setFill()
-            NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1)).fill()
-            let text = NSAttributedString(string: self.glyph, attributes: [
-                .font: NSFont.systemFont(ofSize: 8.5, weight: .bold),
-                .foregroundColor: NSColor.white,
-            ])
-            let size = text.size()
-            text.draw(at: .init(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2))
-            return true
-        }
-        image.isTemplate = false
-        return image
+        workspaceAgentBadgeImage(glyph: glyph, color: nsColor)
     }
 }
 
-/// Agent 快捷启动菜单项列表(项目行 bolt 菜单与右键菜单共用)。
+/// 记号位图:彩圆底 + 白色字符。菜单会剥离符号配色,自绘位图不受
+/// 影响(同 WorkspaceColorTag.menuImage)。内置与自定义 Agent 共用。
+func workspaceAgentBadgeImage(glyph: String, color: NSColor) -> NSImage {
+    let image = NSImage(size: .init(width: 16, height: 16), flipped: false) { rect in
+        color.setFill()
+        NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1)).fill()
+        let text = NSAttributedString(string: glyph, attributes: [
+            .font: NSFont.systemFont(ofSize: 8.5, weight: .bold),
+            .foregroundColor: NSColor.white,
+        ])
+        let size = text.size()
+        text.draw(at: .init(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2))
+        return true
+    }
+    image.isTemplate = false
+    return image
+}
+
+/// 自定义 Agent:用户添加的「名称 + 启动命令」,后续新 AI CLI 无需改代码。
+struct WorkspaceCustomAgent: Codable, Identifiable, Equatable {
+    var id: UUID = UUID()
+    var title: String
+    var command: String
+
+    /// 记号色:按名称确定性取色,重启不变。
+    var nsColor: NSColor {
+        let palette: [NSColor] = [
+            .systemTeal, .systemPink, .systemIndigo, .systemBrown,
+            .systemOrange, .systemPurple, .systemGreen,
+        ]
+        let sum = title.unicodeScalars.reduce(0) { $0 + Int($1.value) }
+        return palette[sum % palette.count]
+    }
+
+    func menuImage() -> NSImage {
+        workspaceAgentBadgeImage(
+            glyph: String(title.prefix(1)).uppercased(),
+            color: nsColor)
+    }
+}
+
+/// 自定义 Agent 列表,持久化到 UserDefaults。
+final class WorkspaceAgentStore: ObservableObject {
+    static let shared = WorkspaceAgentStore()
+
+    @Published private(set) var custom: [WorkspaceCustomAgent] = []
+    private let key = "WorkspaceCustomAgents"
+
+    private init() {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let list = try? JSONDecoder().decode([WorkspaceCustomAgent].self, from: data)
+        else { return }
+        custom = list
+    }
+
+    func add(title: String, command: String) {
+        custom.append(.init(title: title, command: command))
+        save()
+    }
+
+    func remove(_ agent: WorkspaceCustomAgent) {
+        custom.removeAll { $0.id == agent.id }
+        save()
+    }
+
+    private func save() {
+        guard let data = try? JSONEncoder().encode(custom) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
+/// Agent 快捷启动菜单项列表(项目行 sparkles 菜单与右键菜单共用):
+/// 内置 Agent + 用户自定义 Agent + 添加/删除入口。
 struct WorkspaceAgentMenuItems: View {
     let project: WorkspaceProject
     weak var controller: TerminalController?
+    @ObservedObject private var store: WorkspaceAgentStore = .shared
 
     var body: some View {
         ForEach(WorkspaceAgentLauncher.allCases) { agent in
-            Button {
-                controller?.newWorkspaceSession(in: project, initialInput: agent.launchInput)
-            } label: {
-                Label {
-                    Text(agent.title)
-                } icon: {
-                    Image(nsImage: agent.menuImage())
+            launchButton(agent.title, image: agent.menuImage(), input: agent.launchInput)
+        }
+        if !store.custom.isEmpty {
+            Divider()
+            ForEach(store.custom) { agent in
+                launchButton(agent.title, image: agent.menuImage(), input: agent.command + "\n")
+            }
+        }
+        Divider()
+        Button("添加自定义 Agent…") {
+            controller?.promptNewWorkspaceAgent { title, command in
+                WorkspaceAgentStore.shared.add(title: title, command: command)
+            }
+        }
+        if !store.custom.isEmpty {
+            Menu("删除自定义 Agent") {
+                ForEach(store.custom) { agent in
+                    Button(agent.title) { WorkspaceAgentStore.shared.remove(agent) }
                 }
+            }
+        }
+    }
+
+    private func launchButton(_ title: String, image: NSImage, input: String) -> some View {
+        Button {
+            controller?.newWorkspaceSession(in: project, initialInput: input)
+        } label: {
+            Label {
+                Text(title)
+            } icon: {
+                Image(nsImage: image)
             }
         }
     }
@@ -1709,7 +1853,42 @@ struct WorkspaceRootView: View {
                     dragState: controller.workspaceDragState)
             }
         }
+        .overlay(dragChip)
         .coordinateSpace(name: workspaceRootSpace)
+    }
+
+    /// 根层拖拽浮卡:覆盖侧边栏 + 终端区,拖到哪都跟手。
+    @ViewBuilder
+    private var dragChip: some View {
+        if let controller {
+            WorkspaceDragChipOverlay(dragState: controller.workspaceDragState)
+        }
+    }
+}
+
+/// 拖拽中的悬浮小卡片:跟随光标、带阴影抬升感,在整个窗口范围内可见。
+struct WorkspaceDragChipOverlay: View {
+    @ObservedObject var dragState: WorkspaceDragState
+
+    var body: some View {
+        ZStack {
+            if dragState.payload != nil {
+                HStack(spacing: 5) {
+                    Image(systemName: "terminal")
+                        .font(.system(size: 10))
+                    Text(dragState.label)
+                        .font(.system(size: 11.5))
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(Color.accentColor))
+                .foregroundColor(.white)
+                .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+                .position(x: dragState.rootLocation.x, y: dragState.rootLocation.y - 18)
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 
@@ -1787,23 +1966,6 @@ struct WorkspaceDragOverlay: View {
         ZStack {
             if dragState.payload != nil, let rect = dragState.highlight {
                 WorkspaceDockHighlight(rect: rect)
-            }
-
-            // A small chip following the cursor during a drag.
-            if dragState.payload != nil {
-                HStack(spacing: 5) {
-                    Image(systemName: "terminal")
-                        .font(.system(size: 10))
-                    Text(dragState.label)
-                        .font(.system(size: 11.5))
-                        .lineLimit(1)
-                }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(Color.accentColor.opacity(0.85)))
-                .foregroundColor(.white)
-                .position(x: dragState.location.x, y: dragState.location.y - 16)
-                .allowsHitTesting(false)
             }
         }
         .allowsHitTesting(false)
@@ -2124,6 +2286,8 @@ struct WorkspaceProjectSection: View {
     var searchQuery: String = ""
 
     @State private var hovered = false
+    /// 拖拽中:行半透明「抬起」,给出明确的拖拽反馈。
+    @State private var dragging = false
 
     private var isExpanded: Bool {
         searchQuery.isEmpty ? project.expanded : true
@@ -2172,9 +2336,9 @@ struct WorkspaceProjectSection: View {
                 Menu {
                     WorkspaceAgentMenuItems(project: project, controller: controller)
                 } label: {
-                    Image(systemName: "bolt.fill")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(hovered ? .yellow : Color.secondary.opacity(0.55))
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(hovered ? .primary : Color.secondary.opacity(0.45))
                         .frame(width: 18, height: 18)
                         .contentShape(Rectangle())
                 }
@@ -2207,6 +2371,7 @@ struct WorkspaceProjectSection: View {
                 remove: { [weak controller] in
                     controller?.workspaceDragState.projectRowFrames.removeValue(forKey: project.id)
                 }))
+            .opacity(dragging ? 0.35 : 1)
             .contentShape(Rectangle())
             .onHover { value in
                 withAnimation(.easeOut(duration: 0.12)) { hovered = value }
@@ -2218,12 +2383,14 @@ struct WorkspaceProjectSection: View {
                 // 拖动项目到终端区:在落点处新开该项目目录的终端(跨项目分屏)。
                 DragGesture(minimumDistance: 4, coordinateSpace: .named(workspaceRootSpace))
                     .onChanged { value in
+                        if !dragging { withAnimation(.easeOut(duration: 0.12)) { dragging = true } }
                         controller?.workspaceDragChanged(
                             payload: .project(project.id),
                             label: project.name,
                             rootLocation: value.location)
                     }
                     .onEnded { _ in
+                        withAnimation(.easeOut(duration: 0.12)) { dragging = false }
                         controller?.workspaceDragEnded()
                     }
             )
@@ -2299,8 +2466,13 @@ struct WorkspaceSessionRow: View {
     var searchQuery: String = ""
 
     @State private var hovered = false
+    /// 拖拽中:行半透明「抬起」,给出明确的拖拽反馈。
+    @State private var dragging = false
 
     private var isActive: Bool { state.activeSessionID == session.id }
+
+    /// 已并入其他分屏布局(行保留,点击聚焦那个分区)。
+    private var isDocked: Bool { session.tree == nil && session.dockedSurfaceID != nil }
 
     private var rowBackground: Color {
         if isActive { return Color.accentColor.opacity(0.24) }
@@ -2310,9 +2482,10 @@ struct WorkspaceSessionRow: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: "terminal")
+            Image(systemName: isDocked ? "rectangle.split.2x1" : "terminal")
                 .font(.system(size: 9.5))
                 .foregroundColor(isActive || hovered ? .primary : Color.secondary.opacity(0.75))
+                .help(isDocked ? "已并入分屏,点击聚焦该分区" : "")
             WorkspaceSessionTitle(session: session, searchQuery: searchQuery)
                 .foregroundColor(isActive || hovered ? .primary : .secondary)
             Spacer()
@@ -2343,6 +2516,7 @@ struct WorkspaceSessionRow: View {
             remove: { [weak controller] in
                 controller?.workspaceDragState.sessionRowFrames.removeValue(forKey: session.id)
             }))
+        .opacity(dragging ? 0.35 : 1)
         .onHover { value in
             withAnimation(.easeOut(duration: 0.12)) { hovered = value }
         }
@@ -2352,12 +2526,14 @@ struct WorkspaceSessionRow: View {
             // Drag a session into the terminal area to dock it as a split.
             DragGesture(minimumDistance: 4, coordinateSpace: .named(workspaceRootSpace))
                 .onChanged { value in
+                    if !dragging { withAnimation(.easeOut(duration: 0.12)) { dragging = true } }
                     controller?.workspaceDragChanged(
                         payload: .session(session.id),
                         label: session.title,
                         rootLocation: value.location)
                 }
                 .onEnded { _ in
+                    withAnimation(.easeOut(duration: 0.12)) { dragging = false }
                     controller?.workspaceDragEnded()
                 }
         )
