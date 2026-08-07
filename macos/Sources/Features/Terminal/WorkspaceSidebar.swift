@@ -1355,8 +1355,18 @@ struct WorkspaceToolButton: View {
     }
 }
 
-/// 把所在 ScrollView 的滚动条强制为 overlay 样式:只有滑块、没有轨道,
-/// 不滚动时自动隐藏。放在 ScrollView 内容的 background 上生效。
+/// 只画滑块、不画轨道的 scroller:接鼠标时系统会强制 legacy 样式
+/// (带轨道),单纯改 scrollerStyle 会被拽回去,自绘才是硬保证。
+final class WorkspaceKnobOnlyScroller: NSScroller {
+    override class var isCompatibleWithOverlayScrollers: Bool { true }
+
+    // 只画 knob,轨道与背景一概不画,透出侧边栏底色。
+    override func draw(_ dirtyRect: NSRect) { drawKnob() }
+    override func drawKnobSlot(in slotRect: NSRect, highlight flag: Bool) {}
+}
+
+/// 把所在 ScrollView 的滚动条换成「只有滑块」的样式。
+/// 放在 ScrollView 内容的 background 上生效。
 struct WorkspaceOverlayScrollerStyler: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
@@ -1372,8 +1382,13 @@ struct WorkspaceOverlayScrollerStyler: NSViewRepresentable {
         var current: NSView? = view
         while let v = current, !(v is NSScrollView) { current = v.superview }
         guard let scroll = current as? NSScrollView else { return }
-        scroll.scrollerStyle = .overlay
         scroll.autohidesScrollers = true
+        scroll.horizontalScroller?.isHidden = true
+        if !(scroll.verticalScroller is WorkspaceKnobOnlyScroller) {
+            let scroller = WorkspaceKnobOnlyScroller()
+            scroller.controlSize = .small
+            scroll.verticalScroller = scroller
+        }
     }
 }
 
@@ -2152,21 +2167,23 @@ struct WorkspaceProjectSection: View {
                         .help("已置顶")
                 }
                 Spacer()
-                // 按钮只在悬停时出现,减少静态视觉噪声。
+                // Agent 快捷启动:常驻标签(低调),点开选 Agent 即在该
+                // 项目下新开对话并执行启动命令。
+                Menu {
+                    WorkspaceAgentMenuItems(project: project, controller: controller)
+                } label: {
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(hovered ? .yellow : Color.secondary.opacity(0.55))
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("快捷启动 AI Agent")
+                // 新建对话仍只在悬停时出现,减少静态视觉噪声。
                 if hovered {
-                    // Agent 快捷启动:选一个即在该项目下新开对话并执行启动命令。
-                    Menu {
-                        WorkspaceAgentMenuItems(project: project, controller: controller)
-                    } label: {
-                        Image(systemName: "bolt.fill")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                    }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .help("快捷启动 AI Agent")
-                    .transition(.opacity)
                     Button { controller?.newWorkspaceSession(in: project) } label: {
                         Image(systemName: "plus")
                             .font(.system(size: 11))
