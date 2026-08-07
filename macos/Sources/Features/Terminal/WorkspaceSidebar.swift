@@ -1,3 +1,13 @@
+/**
+ * [INPUT]: TerminalController - 引用自 TerminalController.swift 的 [POS]: 终端窗口控制器,工作区接入点
+ * [INPUT]: SplitTree/Ghostty.SurfaceView - 引用自 Splits/SplitTree.swift 与 Ghostty/SurfaceView 的 [POS]: 分屏树与终端 surface
+ * [OUTPUT]: ProjectManager, WorkspaceProject/Session, WorkspaceSidebarView, WorkspaceRootView,
+ *           WorkspacePaneHeader(含 Agent 快捷启动), WorkspaceDragState(停靠 + 侧边栏排序)
+ * [POS]: 侧边栏全部逻辑:模型/持久化/拖拽(停靠与排序)/UI,Codex 式「项目/对话」工作区
+ *
+ * [PROTOCOL]: 变更时更新此头部,然后检查 CLAUDE.md
+ */
+
 import SwiftUI
 import AppKit
 import Combine
@@ -288,9 +298,38 @@ class ProjectManager: ObservableObject {
             name = last.isEmpty ? path : last
         }
         let project = WorkspaceProject(name: name, path: path)
-        projects.append(project)
+        // 新项目插到最前:置顶组独立展示,所以整体队首即「置顶之外的第一位」。
+        projects.insert(project, at: 0)
         save()
         return project
+    }
+
+    /// 手动拖拽排序:把项目移动到 target 之前(nil = 移到末尾)。
+    func moveProject(_ project: WorkspaceProject, before target: WorkspaceProject?) {
+        guard projects.contains(where: { $0 === project }) else { return }
+        projects.removeAll { $0 === project }
+        if let target, let idx = projects.firstIndex(where: { $0 === target }) {
+            projects.insert(project, at: idx)
+        } else {
+            projects.append(project)
+        }
+        save()
+    }
+
+    /// 项目内对话拖拽排序;对话(终端)不允许跨项目移动。
+    func moveSession(
+        _ session: WorkspaceSession,
+        before target: WorkspaceSession?,
+        in project: WorkspaceProject
+    ) {
+        guard project.sessions.contains(where: { $0 === session }) else { return }
+        project.sessions.removeAll { $0 === session }
+        if let target, let idx = project.sessions.firstIndex(where: { $0 === target }) {
+            project.sessions.insert(session, at: idx)
+        } else {
+            project.sessions.append(session)
+        }
+        save()
     }
 
     /// Match a persisted session to a restored window by surface UUID.
@@ -878,6 +917,19 @@ extension TerminalController {
         let frame = state.terminalFrame
         let local = CGPoint(x: rootLocation.x - frame.minX, y: rootLocation.y - frame.minY)
         state.location = local
+
+        // 悬停在侧边栏上方:解析为「排序」落点,与终端区停靠互斥。
+        if state.sidebarFrame.contains(rootLocation),
+           let reorder = resolveWorkspaceReorder(payload: payload, at: rootLocation) {
+            if state.target != nil { state.target = nil }
+            if state.highlight != nil { state.highlight = nil }
+            if state.reorderTarget != reorder.target { state.reorderTarget = reorder.target }
+            if state.reorderIndicatorY != reorder.indicatorY { state.reorderIndicatorY = reorder.indicatorY }
+            return
+        }
+        if state.reorderTarget != nil { state.reorderTarget = nil }
+        if state.reorderIndicatorY != nil { state.reorderIndicatorY = nil }
+
         // Single spatial pass per event; publish only actual changes.
         let (target, highlight) = WorkspaceDockResolver.resolve(
             at: local, size: frame.size, tree: surfaceTree)
@@ -885,14 +937,89 @@ extension TerminalController {
         if state.highlight != highlight { state.highlight = highlight }
     }
 
-    /// Gesture-driven drag finished: perform the dock and clear the state.
+    /// 解析侧边栏内的拖拽排序落点。返回插入目标与指示线 Y(root 坐标系)。
+    /// 屏幕上的行 frame 即真序:直接按 Y 轴比较,不需要关心置顶分组。
+    private func resolveWorkspaceReorder(
+        payload: WorkspaceDragState.Payload,
+        at point: CGPoint
+    ) -> (target: WorkspaceReorderTarget, indicatorY: CGFloat)? {
+        let state = workspaceDragState
+        let manager = ProjectManager.shared
+        switch payload {
+        case .pane:
+            // 分区面板不参与侧边栏排序。
+            return nil
+
+        case .project(let uuid):
+            // 只有手动排序下拖拽调序才有意义,其余模式顺序由规则决定。
+            guard manager.sortOrder == .manual else { return nil }
+            let rows = state.projectRowFrames
+                .filter { $0.key != uuid }
+                .sorted { $0.value.minY < $1.value.minY }
+            guard let last = rows.last else { return nil }
+            if let hit = rows.first(where: { point.y < $0.value.midY }) {
+                return (.project(before: hit.key), hit.value.minY - 3)
+            }
+            return (.project(before: nil), last.value.maxY + 3)
+
+        case .session(let uuid):
+            guard let session = manager.allSessions.first(where: { $0.id == uuid }),
+                  let project = manager.project(containing: session) else { return nil }
+            // 终端(对话)不可跨项目:候选行只取本项目内的兄弟对话。
+            let rows = project.sessions
+                .filter { $0.id != uuid }
+                .compactMap { sibling in
+                    state.sessionRowFrames[sibling.id].map { (sibling.id, $0) }
+                }
+                .sorted { $0.1.minY < $1.1.minY }
+            guard let first = rows.first, let last = rows.last else { return nil }
+            // 限定在本项目对话区附近,指示线不会飞到别的项目里。
+            guard point.y > first.1.minY - 14, point.y < last.1.maxY + 14 else { return nil }
+            if let hit = rows.first(where: { point.y < $0.1.midY }) {
+                return (.session(inProject: project.id, before: hit.0), hit.1.minY - 1)
+            }
+            return (.session(inProject: project.id, before: nil), last.1.maxY + 1)
+        }
+    }
+
+    /// 执行侧边栏排序落点:项目重排 / 项目内对话重排。
+    private func performWorkspaceReorder(
+        payload: WorkspaceDragState.Payload,
+        target: WorkspaceReorderTarget
+    ) {
+        let manager = ProjectManager.shared
+        switch (payload, target) {
+        case (.project(let uuid), .project(let beforeID)):
+            guard let project = manager.projects.first(where: { $0.id == uuid }) else { return }
+            let before = beforeID.flatMap { id in manager.projects.first { $0.id == id } }
+            manager.moveProject(project, before: before)
+
+        case (.session(let uuid), .session(let projectID, let beforeID)):
+            guard let project = manager.projects.first(where: { $0.id == projectID }),
+                  let session = project.sessions.first(where: { $0.id == uuid }) else { return }
+            let before = beforeID.flatMap { id in project.sessions.first { $0.id == id } }
+            manager.moveSession(session, before: before, in: project)
+
+        default:
+            break
+        }
+    }
+
+    /// Gesture-driven drag finished: perform the reorder/dock and clear the state.
     func workspaceDragEnded() {
         let state = workspaceDragState
         let payload = state.payload
         let target = state.target
+        let reorder = state.reorderTarget
         state.reset()
 
-        guard let payload, let target else { return }
+        guard let payload else { return }
+        // 落在侧边栏内:执行排序,不再走停靠逻辑。
+        if let reorder {
+            performWorkspaceReorder(payload: payload, target: reorder)
+            return
+        }
+        guard let target else { return }
         switch payload {
         case .pane(let uuid):
             moveWorkspacePane(surfaceID: uuid, to: target)
@@ -1067,12 +1194,31 @@ final class WorkspaceDragState: ObservableObject {
     /// kept up to date by the root view's geometry reader.
     var terminalFrame: CGRect = .zero
 
+    /// 侧边栏整体 frame(root 坐标系):拖拽悬停其上时进入「排序」模式。
+    var sidebarFrame: CGRect = .zero
+    /// 侧边栏各行的 frame(root 坐标系),由行视图上报,用于计算插入位置。
+    /// 非 @Published:随滚动高频更新,不应触发视图刷新。
+    var projectRowFrames: [UUID: CGRect] = [:]
+    var sessionRowFrames: [UUID: CGRect] = [:]
+    /// 侧边栏内的排序落点;nil = 当前不在排序模式。
+    @Published var reorderTarget: WorkspaceReorderTarget? = nil
+    /// 排序插入指示线的 Y(root 坐标系)。
+    @Published var reorderIndicatorY: CGFloat? = nil
+
     func reset() {
         payload = nil
         label = ""
         target = nil
         highlight = nil
+        reorderTarget = nil
+        reorderIndicatorY = nil
     }
+}
+
+/// 侧边栏拖拽排序的落点:插入到某行之前(before = nil 表示移到末尾)。
+enum WorkspaceReorderTarget: Equatable {
+    case project(before: UUID?)
+    case session(inProject: UUID, before: UUID?)
 }
 
 /// Pure geometry: resolve dock targets and highlight rects for a point in
@@ -1136,6 +1282,148 @@ enum WorkspaceDockResolver {
 
 /// The named coordinate space covering the whole workspace root view.
 let workspaceRootSpace = "workspaceRoot"
+
+/// 悬浮即显的功能名气泡:系统 .help 延迟长且不显眼,顶部工具区的
+/// 小 icon 用它在 0.35s 内给出即时命名反馈,消除「这按钮是干嘛的」。
+struct WorkspaceTooltip: ViewModifier {
+    let text: String
+    @State private var visible = false
+    @State private var pending: DispatchWorkItem? = nil
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { inside in
+                pending?.cancel()
+                guard inside else {
+                    withAnimation(.easeOut(duration: 0.1)) { visible = false }
+                    return
+                }
+                let work = DispatchWorkItem {
+                    withAnimation(.easeOut(duration: 0.1)) { visible = true }
+                }
+                pending = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+            }
+            .overlay(alignment: .bottom) {
+                if visible {
+                    Text(text)
+                        .font(.system(size: 10.5))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(.thickMaterial)
+                                .shadow(color: .black.opacity(0.25), radius: 4, y: 1))
+                        .fixedSize()
+                        .offset(y: 26)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
+            }
+    }
+}
+
+extension View {
+    func workspaceTooltip(_ text: String) -> some View {
+        modifier(WorkspaceTooltip(text: text))
+    }
+}
+
+/// 把行 frame(root 坐标系)上报给拖拽状态,用于排序落点计算。
+/// 作为 background 使用,不参与布局。
+struct WorkspaceRowFrameReporter: View {
+    let update: (CGRect) -> Void
+    let remove: () -> Void
+
+    var body: some View {
+        GeometryReader { geo in
+            Color.clear
+                .onAppear { update(geo.frame(in: .named(workspaceRootSpace))) }
+                .onChange(of: geo.frame(in: .named(workspaceRootSpace))) { update($0) }
+                .onDisappear { remove() }
+        }
+    }
+}
+
+/// 拖拽排序时的插入位置指示线。挂在侧边栏 overlay 上,只有它在
+/// 拖拽期间随状态刷新,不拖累整个侧边栏。
+struct WorkspaceReorderIndicator: View {
+    @ObservedObject var dragState: WorkspaceDragState
+
+    var body: some View {
+        GeometryReader { geo in
+            if dragState.payload != nil, let y = dragState.reorderIndicatorY {
+                let localY = y - geo.frame(in: .named(workspaceRootSpace)).minY
+                Capsule()
+                    .fill(Color.accentColor)
+                    .frame(width: max(0, geo.size.width - 24), height: 2)
+                    .position(x: geo.size.width / 2, y: localY)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+// MARK: - AI Agent 快捷启动
+
+/// 终端标签栏上的 AI Agent 快捷启动:点一下即向该终端键入启动命令。
+/// 固定集合,品牌色圆标 + 记号字符。
+enum WorkspaceAgentLauncher: String, CaseIterable, Identifiable {
+    case claude, grok, kimi, pi, droid
+
+    var id: String { rawValue }
+
+    /// 键入终端的启动命令(回车直接执行)。
+    var command: String { rawValue + "\n" }
+
+    /// 圆标内的品牌记号。
+    var glyph: String {
+        switch self {
+        case .claude: return "C"
+        case .grok: return "G"
+        case .kimi: return "K"
+        case .pi: return "π"
+        case .droid: return "D"
+        }
+    }
+
+    /// 品牌近似色(圆标底色)。
+    var color: Color {
+        switch self {
+        case .claude: return Color(red: 0.85, green: 0.47, blue: 0.34) // Anthropic 珊瑚橙
+        case .grok: return Color(red: 0.55, green: 0.57, blue: 0.60)   // xAI 石墨灰
+        case .kimi: return Color(red: 0.39, green: 0.40, blue: 0.95)   // Kimi 靛蓝
+        case .pi: return Color(red: 0.06, green: 0.73, blue: 0.51)     // Pi 青绿
+        case .droid: return Color(red: 0.22, green: 0.67, blue: 0.97)  // Factory 天蓝
+        }
+    }
+}
+
+/// 单个 Agent 启动圆标按钮。
+struct WorkspaceAgentChip: View {
+    let agent: WorkspaceAgentLauncher
+    let surface: Ghostty.SurfaceView
+    @State private var hovered = false
+
+    var body: some View {
+        Button {
+            surface.surfaceModel?.sendText(agent.command)
+            Ghostty.moveFocus(to: surface)
+        } label: {
+            Text(agent.glyph)
+                .font(.system(size: 8, weight: .bold, design: .rounded))
+                .foregroundColor(.white)
+                .frame(width: 14, height: 14)
+                .background(Circle().fill(agent.color.opacity(hovered ? 1 : 0.85)))
+                .scaleEffect(hovered ? 1.15 : 1)
+        }
+        .buttonStyle(.plain)
+        .onHover { value in
+            withAnimation(.easeOut(duration: 0.1)) { hovered = value }
+        }
+        .help("启动 \(agent.rawValue)")
+    }
+}
 
 /// Finder 式颜色标签选择器:一排彩色圆点,点击选中、再点同色取消。
 struct WorkspaceTagPicker: View {
@@ -1231,6 +1519,13 @@ struct WorkspacePaneHeader: View {
                 .lineLimit(1)
                 .foregroundColor(.secondary)
             Spacer(minLength: 0)
+            // AI Agent 快捷启动区:常驻但低调,悬停标签栏时提亮。
+            HStack(spacing: 4) {
+                ForEach(WorkspaceAgentLauncher.allCases) { agent in
+                    WorkspaceAgentChip(agent: agent, surface: surface)
+                }
+            }
+            .opacity(hovered ? 1 : 0.55)
             if hovered {
                 HStack(spacing: 9) {
                     Button { split(.right) } label: {
@@ -1487,6 +1782,18 @@ struct WorkspaceSidebarView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.secondary)
                 Spacer()
+                Button {
+                    // 任意一个项目展开则全部收起,否则全部展开:单键往复。
+                    let anyExpanded = manager.projects.contains { $0.expanded }
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        manager.projects.forEach { $0.expanded = !anyExpanded }
+                    }
+                } label: {
+                    Image(systemName: "rectangle.compress.vertical")
+                }
+                .buttonStyle(.plain)
+                .help("全部展开 / 全部收起")
+                .workspaceTooltip("全部展开 / 收起")
                 Menu {
                     ForEach(WorkspaceProjectSort.allCases) { sort in
                         Button {
@@ -1506,6 +1813,7 @@ struct WorkspaceSidebarView: View {
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .help("排序方式")
+                .workspaceTooltip("排序方式")
                 Button {
                     guard let controller else { return }
                     // 临时对话:挂在主目录(Home)项目下的纯终端。
@@ -1516,6 +1824,7 @@ struct WorkspaceSidebarView: View {
                 }
                 .buttonStyle(.plain)
                 .help("新建对话(主目录)")
+                .workspaceTooltip("新建对话")
                 Button {
                     guard let controller else { return }
                     if WorkspaceClaudeIntegration.isConfigured() {
@@ -1539,20 +1848,25 @@ struct WorkspaceSidebarView: View {
                 }
                 .buttonStyle(.plain)
                 .help("一键配置 Claude Code 状态提示")
+                .workspaceTooltip("配置 AI 状态提示")
                 Button { controller?.promptNewWorkspaceProject() } label: {
                     Image(systemName: "folder.badge.plus")
                 }
                 .buttonStyle(.plain)
                 .help("新建项目")
+                .workspaceTooltip("新建项目")
                 Button { withAnimation(.easeInOut(duration: 0.15)) { state.sidebarVisible = false } } label: {
                     Image(systemName: "sidebar.left")
                 }
                 .buttonStyle(.plain)
                 .help("收起侧边栏")
+                .workspaceTooltip("收起侧边栏")
             }
             .padding(.horizontal, 12)
             .padding(.top, 10)
             .padding(.bottom, 6)
+            // 工具区气泡向下弹出,压过搜索框绘制。
+            .zIndex(2)
 
             // 搜索框
             HStack(spacing: 5) {
@@ -1632,6 +1946,19 @@ struct WorkspaceSidebarView: View {
                 .padding(4)
                 .opacity(isDropTargeted ? 1 : 0)
         )
+        // 上报侧边栏 frame(root 坐标系):拖拽悬停其上时切换为排序模式。
+        .background(WorkspaceRowFrameReporter(
+            update: { [weak controller] in controller?.workspaceDragState.sidebarFrame = $0 },
+            remove: { [weak controller] in controller?.workspaceDragState.sidebarFrame = .zero }))
+        .overlay(reorderIndicator)
+    }
+
+    /// 拖拽排序的插入指示线覆盖层。
+    @ViewBuilder
+    private var reorderIndicator: some View {
+        if let dragState = controller?.workspaceDragState {
+            WorkspaceReorderIndicator(dragState: dragState)
+        }
     }
 
     /// 分组小标题(置顶 / 项目)。
@@ -1648,12 +1975,21 @@ struct WorkspaceSidebarView: View {
     private func projectRows(_ list: [WorkspaceProject]) -> some View {
         ForEach(Array(list.enumerated()), id: \.element.id) { index, project in
             if index > 0 {
-                // 项目组之间的分隔:淡线 + 留白,按组分隔比固定
-                // 数量分隔更贴合内容结构。
-                Divider()
-                    .opacity(0.4)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
+                if index % 5 == 0 {
+                    // 每 5 个项目一道加重分隔条:项目多时形成视觉分块,
+                    // 扫读时以块为单位定位,缓解视觉疲劳。
+                    Capsule()
+                        .fill(Color.primary.opacity(0.16))
+                        .frame(height: 2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 9)
+                } else {
+                    // 组内分隔:淡线 + 留白。
+                    Divider()
+                        .opacity(0.4)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                }
             }
             WorkspaceProjectSection(
                 project: project,
@@ -1784,6 +2120,13 @@ struct WorkspaceProjectSection: View {
                 RoundedRectangle(cornerRadius: 5)
                     .fill(hovered ? Color.primary.opacity(0.07) : Color.clear)
             )
+            .background(WorkspaceRowFrameReporter(
+                update: { [weak controller] in
+                    controller?.workspaceDragState.projectRowFrames[project.id] = $0
+                },
+                remove: { [weak controller] in
+                    controller?.workspaceDragState.projectRowFrames.removeValue(forKey: project.id)
+                }))
             .contentShape(Rectangle())
             .onHover { value in
                 withAnimation(.easeOut(duration: 0.12)) { hovered = value }
@@ -1910,6 +2253,13 @@ struct WorkspaceSessionRow: View {
             RoundedRectangle(cornerRadius: 5)
                 .fill(rowBackground)
         )
+        .background(WorkspaceRowFrameReporter(
+            update: { [weak controller] in
+                controller?.workspaceDragState.sessionRowFrames[session.id] = $0
+            },
+            remove: { [weak controller] in
+                controller?.workspaceDragState.sessionRowFrames.removeValue(forKey: session.id)
+            }))
         .onHover { value in
             withAnimation(.easeOut(duration: 0.12)) { hovered = value }
         }
