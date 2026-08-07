@@ -2,7 +2,7 @@
  * [INPUT]: TerminalController - 引用自 TerminalController.swift 的 [POS]: 终端窗口控制器,工作区接入点
  * [INPUT]: SplitTree/Ghostty.SurfaceView - 引用自 Splits/SplitTree.swift 与 Ghostty/SurfaceView 的 [POS]: 分屏树与终端 surface
  * [OUTPUT]: ProjectManager, WorkspaceProject/Session, WorkspaceSidebarView, WorkspaceRootView,
- *           WorkspacePaneHeader(含 Agent 快捷启动), WorkspaceDragState(停靠 + 侧边栏排序)
+ *           WorkspacePaneHeader, WorkspaceAgentLauncher(项目行快捷启动), WorkspaceDragState(停靠 + 侧边栏排序)
  * [POS]: 侧边栏全部逻辑:模型/持久化/拖拽(停靠与排序)/UI,Codex 式「项目/对话」工作区
  *
  * [PROTOCOL]: 变更时更新此头部,然后检查 CLAUDE.md
@@ -643,11 +643,12 @@ extension TerminalController {
         ProjectManager.shared.save()
     }
 
-    /// Create and show a new session in a project.
-    func newWorkspaceSession(in project: WorkspaceProject) {
+    /// Create and show a new session in a project. `initialInput` 会在新
+    /// shell 就绪后自动键入(Agent 快捷启动)。
+    func newWorkspaceSession(in project: WorkspaceProject, initialInput: String? = nil) {
         let session = ProjectManager.shared.addSession(to: project)
         project.expanded = true
-        activateWorkspaceSession(session)
+        activateWorkspaceSession(session, initialInput: initialInput)
     }
 
     /// Register an expiring undo that restores a closed session (its sidebar
@@ -1329,6 +1330,53 @@ extension View {
     }
 }
 
+/// 工具区统一按钮:统一字号 / 命中区 / 悬停底色,消除图标风格漂移。
+struct WorkspaceToolButton: View {
+    let icon: String
+    let tip: String
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundColor(hovered ? .primary : .secondary)
+                .frame(width: 22, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(hovered ? Color.primary.opacity(0.08) : Color.clear))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(tip)
+        .workspaceTooltip(tip)
+    }
+}
+
+/// 把所在 ScrollView 的滚动条强制为 overlay 样式:只有滑块、没有轨道,
+/// 不滚动时自动隐藏。放在 ScrollView 内容的 background 上生效。
+struct WorkspaceOverlayScrollerStyler: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { Self.apply(from: view) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { Self.apply(from: nsView) }
+    }
+
+    private static func apply(from view: NSView) {
+        var current: NSView? = view
+        while let v = current, !(v is NSScrollView) { current = v.superview }
+        guard let scroll = current as? NSScrollView else { return }
+        scroll.scrollerStyle = .overlay
+        scroll.autohidesScrollers = true
+    }
+}
+
 /// 把行 frame(root 坐标系)上报给拖拽状态,用于排序落点计算。
 /// 作为 background 使用,不参与布局。
 struct WorkspaceRowFrameReporter: View {
@@ -1366,17 +1414,28 @@ struct WorkspaceReorderIndicator: View {
 
 // MARK: - AI Agent 快捷启动
 
-/// 终端标签栏上的 AI Agent 快捷启动:点一下即向该终端键入启动命令。
-/// 固定集合,品牌色圆标 + 记号字符。
+/// 项目行上的 AI Agent 快捷启动:选一个 Agent,在该项目下新开对话并
+/// 自动执行启动命令。固定集合,品牌色记号。
 enum WorkspaceAgentLauncher: String, CaseIterable, Identifiable {
     case claude, grok, kimi, pi, droid
 
     var id: String { rawValue }
 
-    /// 键入终端的启动命令(回车直接执行)。
-    var command: String { rawValue + "\n" }
+    /// 菜单显示名。
+    var title: String {
+        switch self {
+        case .claude: return "Claude"
+        case .grok: return "Grok"
+        case .kimi: return "Kimi"
+        case .pi: return "Pi"
+        case .droid: return "Droid"
+        }
+    }
 
-    /// 圆标内的品牌记号。
+    /// 新终端的初始输入:命令 + 换行,shell 就绪后直接执行。
+    var launchInput: String { rawValue + "\n" }
+
+    /// 记号内的品牌字符。
     var glyph: String {
         switch self {
         case .claude: return "C"
@@ -1387,41 +1446,53 @@ enum WorkspaceAgentLauncher: String, CaseIterable, Identifiable {
         }
     }
 
-    /// 品牌近似色(圆标底色)。
-    var color: Color {
+    /// 品牌近似色。真品牌 logo 需要素材文件进 Assets,先用色标记号。
+    var nsColor: NSColor {
         switch self {
-        case .claude: return Color(red: 0.85, green: 0.47, blue: 0.34) // Anthropic 珊瑚橙
-        case .grok: return Color(red: 0.55, green: 0.57, blue: 0.60)   // xAI 石墨灰
-        case .kimi: return Color(red: 0.39, green: 0.40, blue: 0.95)   // Kimi 靛蓝
-        case .pi: return Color(red: 0.06, green: 0.73, blue: 0.51)     // Pi 青绿
-        case .droid: return Color(red: 0.22, green: 0.67, blue: 0.97)  // Factory 天蓝
+        case .claude: return NSColor(red: 0.85, green: 0.47, blue: 0.34, alpha: 1) // Anthropic 珊瑚橙
+        case .grok: return NSColor(red: 0.55, green: 0.57, blue: 0.60, alpha: 1)   // xAI 石墨灰
+        case .kimi: return NSColor(red: 0.39, green: 0.40, blue: 0.95, alpha: 1)   // Kimi 靛蓝
+        case .pi: return NSColor(red: 0.06, green: 0.73, blue: 0.51, alpha: 1)     // Pi 青绿
+        case .droid: return NSColor(red: 0.22, green: 0.67, blue: 0.97, alpha: 1)  // Factory 天蓝
         }
+    }
+
+    /// 菜单用品牌记号位图:彩圆底 + 白色记号字符。菜单会剥离符号
+    /// 配色,自绘位图不受影响(同 WorkspaceColorTag.menuImage)。
+    func menuImage() -> NSImage {
+        let image = NSImage(size: .init(width: 16, height: 16), flipped: false) { rect in
+            self.nsColor.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1)).fill()
+            let text = NSAttributedString(string: self.glyph, attributes: [
+                .font: NSFont.systemFont(ofSize: 8.5, weight: .bold),
+                .foregroundColor: NSColor.white,
+            ])
+            let size = text.size()
+            text.draw(at: .init(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2))
+            return true
+        }
+        image.isTemplate = false
+        return image
     }
 }
 
-/// 单个 Agent 启动圆标按钮。
-struct WorkspaceAgentChip: View {
-    let agent: WorkspaceAgentLauncher
-    let surface: Ghostty.SurfaceView
-    @State private var hovered = false
+/// Agent 快捷启动菜单项列表(项目行 bolt 菜单与右键菜单共用)。
+struct WorkspaceAgentMenuItems: View {
+    let project: WorkspaceProject
+    weak var controller: TerminalController?
 
     var body: some View {
-        Button {
-            surface.surfaceModel?.sendText(agent.command)
-            Ghostty.moveFocus(to: surface)
-        } label: {
-            Text(agent.glyph)
-                .font(.system(size: 8, weight: .bold, design: .rounded))
-                .foregroundColor(.white)
-                .frame(width: 14, height: 14)
-                .background(Circle().fill(agent.color.opacity(hovered ? 1 : 0.85)))
-                .scaleEffect(hovered ? 1.15 : 1)
+        ForEach(WorkspaceAgentLauncher.allCases) { agent in
+            Button {
+                controller?.newWorkspaceSession(in: project, initialInput: agent.launchInput)
+            } label: {
+                Label {
+                    Text(agent.title)
+                } icon: {
+                    Image(nsImage: agent.menuImage())
+                }
+            }
         }
-        .buttonStyle(.plain)
-        .onHover { value in
-            withAnimation(.easeOut(duration: 0.1)) { hovered = value }
-        }
-        .help("启动 \(agent.rawValue)")
     }
 }
 
@@ -1519,13 +1590,6 @@ struct WorkspacePaneHeader: View {
                 .lineLimit(1)
                 .foregroundColor(.secondary)
             Spacer(minLength: 0)
-            // AI Agent 快捷启动区:常驻但低调,悬停标签栏时提亮。
-            HStack(spacing: 4) {
-                ForEach(WorkspaceAgentLauncher.allCases) { agent in
-                    WorkspaceAgentChip(agent: agent, surface: surface)
-                }
-            }
-            .opacity(hovered ? 1 : 0.55)
             if hovered {
                 HStack(spacing: 9) {
                     Button { split(.right) } label: {
@@ -1608,7 +1672,7 @@ struct WorkspaceRootView: View {
     @ObservedObject var manager: ProjectManager = .shared
 
     /// 侧边栏宽度,可拖拽调节并持久化。
-    @AppStorage("WorkspaceSidebarWidth") private var sidebarWidth: Double = 240
+    @AppStorage("WorkspaceSidebarWidth") private var sidebarWidth: Double = 300
 
     var body: some View {
         HStack(spacing: 0) {
@@ -1616,7 +1680,7 @@ struct WorkspaceRootView: View {
                 // 不自绘背景:透出窗口背景色(Ghostty 会把它同步成终端
                 // 当前的主题背景色),保证侧边栏与终端面板颜色一致。
                 WorkspaceSidebarView(manager: manager, state: state, controller: controller)
-                    .frame(width: CGFloat(min(420, max(180, sidebarWidth))))
+                    .frame(width: CGFloat(min(480, max(200, sidebarWidth))))
                 WorkspaceSidebarResizeHandle(width: $sidebarWidth)
             } else {
                 WorkspaceCollapsedRail(state: state)
@@ -1659,7 +1723,7 @@ struct WorkspaceSidebarResizeHandle: View {
             DragGesture(minimumDistance: 1)
                 .onChanged { value in
                     if startWidth == nil { startWidth = width }
-                    width = min(420, max(180, (startWidth ?? width) + value.translation.width))
+                    width = min(480, max(200, (startWidth ?? width) + value.translation.width))
                 }
                 .onEnded { _ in startWidth = nil }
         )
@@ -1777,23 +1841,18 @@ struct WorkspaceSidebarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
+            HStack(spacing: 3) {
                 Text("工作区")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.secondary)
                 Spacer()
-                Button {
+                WorkspaceToolButton(icon: "chevron.up.chevron.down", tip: "全部展开 / 收起") {
                     // 任意一个项目展开则全部收起,否则全部展开:单键往复。
                     let anyExpanded = manager.projects.contains { $0.expanded }
                     withAnimation(.easeInOut(duration: 0.15)) {
                         manager.projects.forEach { $0.expanded = !anyExpanded }
                     }
-                } label: {
-                    Image(systemName: "rectangle.compress.vertical")
                 }
-                .buttonStyle(.plain)
-                .help("全部展开 / 全部收起")
-                .workspaceTooltip("全部展开 / 收起")
                 Menu {
                     ForEach(WorkspaceProjectSort.allCases) { sort in
                         Button {
@@ -1807,25 +1866,25 @@ struct WorkspaceSidebarView: View {
                         }
                     }
                 } label: {
+                    // 与 WorkspaceToolButton 同规格,保持工具区视觉一致。
                     Image(systemName: "arrow.up.arrow.down")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .help("排序方式")
                 .workspaceTooltip("排序方式")
-                Button {
+                WorkspaceToolButton(icon: "square.and.pencil", tip: "新建对话") {
                     guard let controller else { return }
                     // 临时对话:挂在主目录(Home)项目下的纯终端。
                     let home = ProjectManager.shared.project(forPath: NSHomeDirectory())
                     controller.newWorkspaceSession(in: home)
-                } label: {
-                    Image(systemName: "square.and.pencil")
                 }
-                .buttonStyle(.plain)
-                .help("新建对话(主目录)")
-                .workspaceTooltip("新建对话")
-                Button {
+                WorkspaceToolButton(icon: "wand.and.stars", tip: "配置 AI 状态提示") {
                     guard let controller else { return }
                     if WorkspaceClaudeIntegration.isConfigured() {
                         controller.showWorkspaceInfoAlert(
@@ -1843,24 +1902,13 @@ struct WorkspaceSidebarView: View {
                             "配置失败",
                             "无法写入 ~/.claude/settings.json:\(error.localizedDescription)")
                     }
-                } label: {
-                    Image(systemName: "wand.and.stars")
                 }
-                .buttonStyle(.plain)
-                .help("一键配置 Claude Code 状态提示")
-                .workspaceTooltip("配置 AI 状态提示")
-                Button { controller?.promptNewWorkspaceProject() } label: {
-                    Image(systemName: "folder.badge.plus")
+                WorkspaceToolButton(icon: "folder.badge.plus", tip: "新建项目") {
+                    controller?.promptNewWorkspaceProject()
                 }
-                .buttonStyle(.plain)
-                .help("新建项目")
-                .workspaceTooltip("新建项目")
-                Button { withAnimation(.easeInOut(duration: 0.15)) { state.sidebarVisible = false } } label: {
-                    Image(systemName: "sidebar.left")
+                WorkspaceToolButton(icon: "sidebar.left", tip: "收起侧边栏") {
+                    withAnimation(.easeInOut(duration: 0.15)) { state.sidebarVisible = false }
                 }
-                .buttonStyle(.plain)
-                .help("收起侧边栏")
-                .workspaceTooltip("收起侧边栏")
             }
             .padding(.horizontal, 12)
             .padding(.top, 10)
@@ -1932,6 +1980,8 @@ struct WorkspaceSidebarView: View {
                     }
                     .padding(.horizontal, 8)
                     .padding(.bottom, 8)
+                    // 滚动条只留滑块、去掉轨道,不滚动时自动隐藏。
+                    .background(WorkspaceOverlayScrollerStyler())
                 }
             }
         }
@@ -2104,6 +2154,19 @@ struct WorkspaceProjectSection: View {
                 Spacer()
                 // 按钮只在悬停时出现,减少静态视觉噪声。
                 if hovered {
+                    // Agent 快捷启动:选一个即在该项目下新开对话并执行启动命令。
+                    Menu {
+                        WorkspaceAgentMenuItems(project: project, controller: controller)
+                    } label: {
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("快捷启动 AI Agent")
+                    .transition(.opacity)
                     Button { controller?.newWorkspaceSession(in: project) } label: {
                         Image(systemName: "plus")
                             .font(.system(size: 11))
@@ -2154,6 +2217,9 @@ struct WorkspaceProjectSection: View {
             }
             .contextMenu {
                 Button("新建对话") { controller?.newWorkspaceSession(in: project) }
+                Menu("快捷启动 Agent") {
+                    WorkspaceAgentMenuItems(project: project, controller: controller)
+                }
                 Divider()
                 Button(project.pinned ? "取消置顶" : "置顶项目") {
                     ProjectManager.shared.togglePin(project)

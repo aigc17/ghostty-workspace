@@ -9,7 +9,7 @@
 - `TerminalRestorable.swift`: 窗口状态持久化/恢复(NSWindowRestoration)。
 - `TerminalView.swift`: 终端区 SwiftUI 容器视图。
 - `ErrorView.swift`: 终端创建失败时的错误占位视图。
-- `WorkspaceSidebar.swift`: 侧边栏全部逻辑——项目/对话模型与持久化、拖拽停靠与侧边栏排序、AI Agent 快捷启动、全部展开/收起、工具区 tooltip。⚠️ 已超 800 行,待拆分(模型/拖拽/视图)。
+- `WorkspaceSidebar.swift`: 侧边栏全部逻辑——项目/对话模型与持久化、拖拽停靠与侧边栏排序、项目行 AI Agent 快捷启动菜单、全部展开/收起、统一工具按钮(WorkspaceToolButton)与即时 tooltip、overlay 滚动条。⚠️ 已超 800 行,待拆分(模型/拖拽/视图)。
 - `Window Styles/`: 各窗口样式(titlebar tabs 等)子目录。
 
 **⚠️ 自指声明**:一旦本文件夹新增/删除/修改文件或职责变动,请立即更新本文档。
