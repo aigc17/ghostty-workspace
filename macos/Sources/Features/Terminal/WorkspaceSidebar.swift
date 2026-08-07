@@ -1656,9 +1656,12 @@ enum WorkspaceAgentMenuPresenter {
             // 菜单回调是 nonisolated 上下文,sendText 是 MainActor 隔离,
             // 显式跳回主线程。
             DispatchQueue.main.async {
-                guard let surface else { return }
-                // sendText 走 pty 原始输入:回车必须是 \r,\n 只会落成文本。
-                surface.surfaceModel?.sendText(input.replacingOccurrences(of: "\n", with: "\r"))
+                guard let surface, let model = surface.surfaceModel else { return }
+                // sendText 是「文字插入」通道,\n/\r 不会被编码成回车键;
+                // 命令正文走文本,回车必须补一对 Enter 键事件才会执行。
+                model.sendText(input.trimmingCharacters(in: .newlines))
+                model.sendKeyEvent(.init(key: .enter))
+                model.sendKeyEvent(.init(key: .enter, action: .release))
                 Ghostty.moveFocus(to: surface)
             }
         }
