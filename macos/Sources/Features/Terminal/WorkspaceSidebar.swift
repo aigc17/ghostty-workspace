@@ -1654,6 +1654,18 @@ enum WorkspaceAgentMenuPresenter {
         submenu(for: surface).popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 
+    /// 对话行入口:活对话在其终端里执行;已关闭的对话先激活(重建
+    /// shell)再自动执行启动命令。
+    static func present(activating session: WorkspaceSession, controller: TerminalController?) {
+        if let surface = session.primarySurface {
+            present(for: surface)
+            return
+        }
+        buildMenu(controller: controller) { [weak controller] input in
+            controller?.activateWorkspaceSession(session, initialInput: input)
+        }.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+
     /// 终端右键菜单入口:同一套菜单挂为子菜单,命令在该终端执行。
     static func submenu(for surface: Ghostty.SurfaceView) -> NSMenu {
         let controller = surface.window?.windowController as? TerminalController
@@ -2743,6 +2755,10 @@ struct WorkspaceSessionRow: View {
                 }
                 Divider()
             }
+            Button("快捷启动 AI Agent…") {
+                WorkspaceAgentMenuPresenter.present(activating: session, controller: controller)
+            }
+            Divider()
             Button("重命名对话…") {
                 controller?.promptWorkspaceRename(title: "重命名对话", current: session.title) { name in
                     session.title = name
