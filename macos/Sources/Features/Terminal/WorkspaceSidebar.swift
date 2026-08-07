@@ -945,6 +945,25 @@ extension TerminalController {
         ProjectManager.shared.save()
     }
 
+    /// 长按触发的拖拽开始:卡片立即以行位置弹出并给触觉反馈,让
+    /// 「拿起来了」在移动之前就成立。落点解析等 workspaceDragChanged。
+    func workspaceDragBegan(
+        payload: WorkspaceDragState.Payload,
+        label: String,
+        rowFrame: CGRect?
+    ) {
+        let state = workspaceDragState
+        if let current = state.payload, current != payload { state.reset() }
+        if state.payload == nil {
+            state.payload = payload
+            state.label = label
+        }
+        if let rowFrame {
+            state.rootLocation = CGPoint(x: rowFrame.midX, y: rowFrame.midY)
+        }
+        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .default)
+    }
+
     /// Gesture-driven drag in progress: update the drag state (chip position,
     /// resolved target, highlight). `rootLocation` is in the workspace root
     /// coordinate space.
@@ -1453,6 +1472,37 @@ struct WorkspaceOverlayScrollerStyler: NSViewRepresentable {
     }
 }
 
+/// 行拖拽手势(项目行 / 对话行共用):按住 ~0.2s 卡片立即弹出,
+/// 随后拖动跟手。快速点击(< 0.2s)不受影响,仍走行的 onTap。
+func workspaceRowDragGesture(
+    controller: TerminalController?,
+    payload: WorkspaceDragState.Payload,
+    label: @escaping () -> String,
+    rowFrame: @escaping () -> CGRect?,
+    dragging: Binding<Bool>
+) -> some Gesture {
+    LongPressGesture(minimumDuration: 0.18, maximumDistance: 10000)
+        .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named(workspaceRootSpace)))
+        .onChanged { value in
+            switch value {
+            case .first(true):
+                if !dragging.wrappedValue {
+                    withAnimation(.easeOut(duration: 0.12)) { dragging.wrappedValue = true }
+                }
+                controller?.workspaceDragBegan(payload: payload, label: label(), rowFrame: rowFrame())
+            case .second(true, let drag):
+                guard let drag else { break }
+                controller?.workspaceDragChanged(payload: payload, label: label(), rootLocation: drag.location)
+            default:
+                break
+            }
+        }
+        .onEnded { _ in
+            withAnimation(.easeOut(duration: 0.12)) { dragging.wrappedValue = false }
+            controller?.workspaceDragEnded()
+        }
+}
+
 /// 把行 frame(root 坐标系)上报给拖拽状态,用于排序落点计算。
 /// 作为 background 使用,不参与布局。
 struct WorkspaceRowFrameReporter: View {
@@ -1533,9 +1583,23 @@ enum WorkspaceAgentLauncher: String, CaseIterable, Identifiable {
         }
     }
 
-    /// 菜单用品牌记号位图。
+    /// 菜单用品牌 logo:优先 Assets 里的官方图(AgentLogo-*,缓存 16pt
+    /// 稳定实例;Grok/Kimi 为 template 自适应菜单深浅色),缺素材的
+    /// 品牌(pi)回退到色标记号。
     func menuImage() -> NSImage {
-        workspaceAgentBadgeImage(glyph: glyph, color: nsColor)
+        let key = "logo-\(rawValue)"
+        if let cached = workspaceAgentBadgeCache[key] { return cached }
+        guard let asset = NSImage(named: "AgentLogo-\(rawValue)") else {
+            return workspaceAgentBadgeImage(glyph: glyph, color: nsColor)
+        }
+        let isTemplate = asset.isTemplate
+        let image = NSImage(size: .init(width: 16, height: 16), flipped: false) { rect in
+            asset.draw(in: rect)
+            return true
+        }
+        image.isTemplate = isTemplate
+        workspaceAgentBadgeCache[key] = image
+        return image
     }
 }
 
@@ -1965,8 +2029,11 @@ struct WorkspaceDragChipOverlay: View {
                 .foregroundColor(.white)
                 .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
                 .position(x: dragState.rootLocation.x, y: dragState.rootLocation.y - 18)
+                .transition(.scale(scale: 0.85).combined(with: .opacity))
             }
         }
+        // 长按弹出时带一点弹性,强化「拿起来了」。
+        .animation(.spring(response: 0.25, dampingFraction: 0.75), value: dragState.payload != nil)
         .allowsHitTesting(false)
     }
 }
@@ -2457,19 +2524,16 @@ struct WorkspaceProjectSection: View {
                 withAnimation(.easeInOut(duration: 0.15)) { project.expanded.toggle() }
             }
             .gesture(
-                // 拖动项目到终端区:在落点处新开该项目目录的终端(跨项目分屏)。
-                DragGesture(minimumDistance: 4, coordinateSpace: .named(workspaceRootSpace))
-                    .onChanged { value in
-                        if !dragging { withAnimation(.easeOut(duration: 0.12)) { dragging = true } }
-                        controller?.workspaceDragChanged(
-                            payload: .project(project.id),
-                            label: project.name,
-                            rootLocation: value.location)
-                    }
-                    .onEnded { _ in
-                        withAnimation(.easeOut(duration: 0.12)) { dragging = false }
-                        controller?.workspaceDragEnded()
-                    }
+                // 拖到终端区在落点新开该项目目录的终端(跨项目分屏),
+                // 拖回侧边栏则调整项目顺序。
+                workspaceRowDragGesture(
+                    controller: controller,
+                    payload: .project(project.id),
+                    label: { project.name },
+                    rowFrame: { [weak controller] in
+                        controller?.workspaceDragState.projectRowFrames[project.id]
+                    },
+                    dragging: $dragging)
             )
             .onDisappear {
                 if controller?.workspaceDragState.payload == .project(project.id) {
@@ -2600,19 +2664,15 @@ struct WorkspaceSessionRow: View {
         .contentShape(Rectangle())
         .onTapGesture { controller?.activateWorkspaceSession(session) }
         .gesture(
-            // Drag a session into the terminal area to dock it as a split.
-            DragGesture(minimumDistance: 4, coordinateSpace: .named(workspaceRootSpace))
-                .onChanged { value in
-                    if !dragging { withAnimation(.easeOut(duration: 0.12)) { dragging = true } }
-                    controller?.workspaceDragChanged(
-                        payload: .session(session.id),
-                        label: session.title,
-                        rootLocation: value.location)
-                }
-                .onEnded { _ in
-                    withAnimation(.easeOut(duration: 0.12)) { dragging = false }
-                    controller?.workspaceDragEnded()
-                }
+            // 拖到终端区停靠分屏,拖回侧边栏排序(项目内)。
+            workspaceRowDragGesture(
+                controller: controller,
+                payload: .session(session.id),
+                label: { session.title },
+                rowFrame: { [weak controller] in
+                    controller?.workspaceDragState.sessionRowFrames[session.id]
+                },
+                dragging: $dragging)
         )
         .onDisappear {
             // Row removed mid-drag: the gesture is cancelled without onEnded.
