@@ -6,7 +6,21 @@
 - `macos/Sources/Features/Terminal/TerminalController.swift` — 工作区接入点(搜 "Workspace")
 - `macos/Sources/Features/Splits/TerminalSplitTreeView.swift` — 分区标签栏
 
-构建:`DEVELOPER_DIR=/Applications/Xcode.app`(需 Xcode 16.x,主干勿升 Xcode 26 依赖),先 `zig build -Dxcframework-target=native -Doptimize=ReleaseFast -Demit-macos-app=false`(Zig 0.14.1),再 `cd macos && xcodebuild -target Ghostty -configuration ReleaseLocal -arch arm64 build PRODUCT_BUNDLE_IDENTIFIER=com.qimu.ghostty-workspace INFOPLIST_KEY_CFBundleDisplayName="Ghostty Workspace"`。
+构建:`DEVELOPER_DIR=/Applications/Xcode.app`(需 Xcode 16.x,主干勿升 Xcode 26 依赖),先 `zig build -Dxcframework-target=native -Doptimize=ReleaseFast -Demit-macos-app=false -Dversion-string=1.2.3`(Zig 0.14.1),再 `cd macos && xcodebuild -target Ghostty -configuration ReleaseLocal -arch arm64 build PRODUCT_BUNDLE_IDENTIFIER=com.qimu.ghostty-workspace INFOPLIST_KEY_CFBundleDisplayName="Ghostty Workspace"`。
+
+## 踩坑记录
+
+### 2026-08-07 zig build 在 tag 上 panic
+- **现象**:`zig build` 报 `tagged releases must be in vX.Y.Z format matching build.zig`
+- **根因**:仓库 HEAD 能被 git describe 解析到上游 tag,与 build.zig 内的版本校验冲突
+- **解决**:加 `-Dversion-string=1.2.3` 跳过 git 版本探测(已写入上方构建命令)
+- **教训**:fork 仓库构建一律显式传 version-string
+
+### 2026-08-07 Xcode 16.0 不支持参数尾随逗号
+- **现象**:App Intents 数个文件报 `unexpected ',' separator`
+- **根因**:上游代码用了 Swift 6.1(Xcode 16.3+)的参数列表尾随逗号语法,本机 Xcode 16.0 是 Swift 6.0
+- **解决**:删掉 4 处尾随逗号(CloseTerminalIntent/NewTerminalIntent/IntentPermission/CommandEntity)
+- **教训**:同步上游代码后先在 Xcode 16.0 下编译一遍,尾随逗号语法需降级
 
 ## AI 助手请注意:自动配置 Claude Code 状态提示(开箱即用)
 
