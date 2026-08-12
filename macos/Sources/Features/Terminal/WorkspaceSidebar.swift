@@ -1411,6 +1411,42 @@ extension View {
 }
 
 /// 工具区统一按钮:统一字号 / 命中区 / 悬停底色,消除图标风格漂移。
+/// 工具区图标:Lucide 图标集(shadcn/ui 同款),SVG 存在 Assets 的
+/// `Icon-*` imageset 里,模板渲染取色。
+///
+/// 选它不是审美偏好,是量出来的:Lucide 全套画在同一 24×24 网格、
+/// 统一 2px 描边,六个图标墨迹高度落在 11.5–14pt;换成混家族的
+/// SF Symbols 则是 6.75–11.75pt,排成一行怎么调间距都不齐。
+///
+/// ⚠️ 尺寸和框由这里统一定义,**任何按钮都不要单独覆盖**。
+/// 曾经为了「抹平视觉重量」给每个符号单独设字号,结果字号不同
+/// 基线就不同,固定高度的框里反而中线全歪了。
+struct WorkspaceToolIcon: View {
+    /// Assets 里的资源名,不含 `Icon-` 前缀。
+    let icon: String
+    let hovered: Bool
+
+    /// 图形绘制尺寸(24pt 画布等比缩到此值,描边随之变细)。
+    static let artSize: CGFloat = 15
+    /// 按钮外框:决定悬停底色和点击热区,全工具区一致。
+    static let boxSize: CGFloat = 22
+
+    var body: some View {
+        Image("Icon-\(icon)")
+            .renderingMode(.template)
+            .resizable()
+            .frame(width: Self.artSize, height: Self.artSize)
+            .foregroundColor(hovered ? .primary : .secondary)
+            .frame(width: Self.boxSize, height: Self.boxSize)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(hovered ? Color.primary.opacity(0.08) : Color.clear))
+            .contentShape(Rectangle())
+    }
+}
+
+/// 工具区按钮。按钮与排序菜单共用 `WorkspaceToolIcon`,
+/// 否则两条视觉路径迟早走偏(菜单一度就漏了悬停底色)。
 struct WorkspaceToolButton: View {
     let icon: String
     let tip: String
@@ -1419,14 +1455,7 @@ struct WorkspaceToolButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 11.5, weight: .medium))
-                .foregroundColor(hovered ? .primary : .secondary)
-                .frame(width: 22, height: 22)
-                .background(
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(hovered ? Color.primary.opacity(0.08) : Color.clear))
-                .contentShape(Rectangle())
+            WorkspaceToolIcon(icon: icon, hovered: hovered)
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
@@ -1637,6 +1666,28 @@ final class WorkspaceMenuAction: NSObject {
     }
 
     @objc func run(_ sender: Any?) { handler() }
+}
+
+/// 排序菜单,同样走 AppKit。这里不用 SwiftUI Menu 是因为它会把标签
+/// 塞进自己的控件宿主重新缩放,`WorkspaceToolIcon` 设的 15pt 被覆盖,
+/// 图标比同排其余按钮大一圈,整排就对不齐了。
+enum WorkspaceSortMenuPresenter {
+    static func present(manager: ProjectManager) {
+        let menu = NSMenu()
+        for sort in WorkspaceProjectSort.allCases {
+            let action = WorkspaceMenuAction { manager.sortOrder = sort }
+            let item = NSMenuItem(
+                title: sort.title,
+                action: #selector(WorkspaceMenuAction.run(_:)),
+                keyEquivalent: "")
+            item.target = action
+            // NSMenuItem 不持有 target,借 representedObject 保活闭包蹦床。
+            item.representedObject = action
+            item.state = manager.sortOrder == sort ? .on : .off
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
 }
 
 /// 点击时即时构建并弹出 Agent 菜单(AppKit)。不给每个项目行常驻
@@ -2227,50 +2278,34 @@ struct WorkspaceSidebarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 3) {
+            // 六个按钮等框等距,不做分组留白:图标本身宽窄就有差异,
+            // 再叠一层不等间距,看上去只会是排版没对齐。
+            HStack(spacing: 2) {
                 Text("工作区")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.secondary)
-                Spacer()
-                WorkspaceToolButton(icon: "chevron.up.chevron.down", tip: "全部展开 / 收起") {
+                Spacer(minLength: 4)
+
+                WorkspaceToolButton(icon: "collapse", tip: "全部展开 / 收起") {
                     // 任意一个项目展开则全部收起,否则全部展开:单键往复。
                     let anyExpanded = manager.projects.contains { $0.expanded }
                     withAnimation(.easeInOut(duration: 0.15)) {
                         manager.projects.forEach { $0.expanded = !anyExpanded }
                     }
                 }
-                Menu {
-                    ForEach(WorkspaceProjectSort.allCases) { sort in
-                        Button {
-                            manager.sortOrder = sort
-                        } label: {
-                            if manager.sortOrder == sort {
-                                Label(sort.title, systemImage: "checkmark")
-                            } else {
-                                Text(sort.title)
-                            }
-                        }
-                    }
-                } label: {
-                    // 与 WorkspaceToolButton 同规格,保持工具区视觉一致。
-                    Image(systemName: "arrow.up.arrow.down")
-                        .font(.system(size: 11.5, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
+                WorkspaceToolButton(icon: "sort", tip: "排序方式") {
+                    WorkspaceSortMenuPresenter.present(manager: manager)
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("排序方式")
-                .workspaceTooltip("排序方式")
-                WorkspaceToolButton(icon: "square.and.pencil", tip: "新建对话") {
+                WorkspaceToolButton(icon: "newTerminal", tip: "新建对话") {
                     guard let controller else { return }
                     // 临时对话:挂在主目录(Home)项目下的纯终端。
                     let home = ProjectManager.shared.project(forPath: NSHomeDirectory())
                     controller.newWorkspaceSession(in: home)
                 }
-                WorkspaceToolButton(icon: "wand.and.stars", tip: "配置 AI 状态提示") {
+                WorkspaceToolButton(icon: "newProject", tip: "新建项目") {
+                    controller?.promptNewWorkspaceProject()
+                }
+                WorkspaceToolButton(icon: "aiStatus", tip: "配置 AI 状态提示") {
                     guard let controller else { return }
                     if WorkspaceClaudeIntegration.isConfigured() {
                         controller.showWorkspaceInfoAlert(
@@ -2289,10 +2324,7 @@ struct WorkspaceSidebarView: View {
                             "无法写入 ~/.claude/settings.json:\(error.localizedDescription)")
                     }
                 }
-                WorkspaceToolButton(icon: "folder.badge.plus", tip: "新建项目") {
-                    controller?.promptNewWorkspaceProject()
-                }
-                WorkspaceToolButton(icon: "sidebar.left", tip: "收起侧边栏") {
+                WorkspaceToolButton(icon: "sidebar", tip: "收起侧边栏") {
                     withAnimation(.easeInOut(duration: 0.15)) { state.sidebarVisible = false }
                 }
             }
