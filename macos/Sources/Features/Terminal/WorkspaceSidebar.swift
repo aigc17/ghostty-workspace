@@ -1599,7 +1599,7 @@ final class WorkspacePromptTextField: NSTextField {
 /// 项目行上的 AI Agent 快捷启动:选一个 Agent,在该项目下新开对话并
 /// 自动执行启动命令。固定集合,品牌色记号。
 enum WorkspaceAgentLauncher: String, CaseIterable, Identifiable {
-    case claude, grok, kimi, pi, droid
+    case claude, cursor, grok, kimi, pi, droid
 
     var id: String { rawValue }
 
@@ -1607,6 +1607,7 @@ enum WorkspaceAgentLauncher: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .claude: return "Claude"
+        case .cursor: return "Cursor"
         case .grok: return "Grok"
         case .kimi: return "Kimi"
         case .pi: return "Pi"
@@ -1615,12 +1616,19 @@ enum WorkspaceAgentLauncher: String, CaseIterable, Identifiable {
     }
 
     /// 新终端的初始输入:命令 + 换行,shell 就绪后直接执行。
-    var launchInput: String { rawValue + "\n" }
+    var launchInput: String {
+        switch self {
+        // Cursor CLI 的可执行名是 cursor-agent(`cursor` 是打开编辑器)。
+        case .cursor: return "cursor-agent\n"
+        default: return rawValue + "\n"
+        }
+    }
 
     /// 记号内的品牌字符。
     var glyph: String {
         switch self {
         case .claude: return "C"
+        case .cursor: return "▮"
         case .grok: return "G"
         case .kimi: return "K"
         case .pi: return "π"
@@ -1632,6 +1640,7 @@ enum WorkspaceAgentLauncher: String, CaseIterable, Identifiable {
     var nsColor: NSColor {
         switch self {
         case .claude: return NSColor(red: 0.85, green: 0.47, blue: 0.34, alpha: 1) // Anthropic 珊瑚橙
+        case .cursor: return NSColor(white: 0.25, alpha: 1)                        // Cursor 黑
         case .grok: return NSColor(red: 0.55, green: 0.57, blue: 0.60, alpha: 1)   // xAI 石墨灰
         case .kimi: return NSColor(red: 0.39, green: 0.40, blue: 0.95, alpha: 1)   // Kimi 靛蓝
         case .pi: return NSColor(red: 0.06, green: 0.73, blue: 0.51, alpha: 1)     // Pi 青绿
@@ -1917,7 +1926,11 @@ struct WorkspaceAgentMenuItems: View {
         if !store.custom.isEmpty {
             Menu("删除自定义 Agent") {
                 ForEach(store.custom) { agent in
-                    Button(agent.title) { WorkspaceAgentStore.shared.remove(agent) }
+                    Button {
+                        WorkspaceAgentStore.shared.remove(agent)
+                    } label: {
+                        menuLabel(agent.title, image: agent.menuImage())
+                    }
                 }
             }
         }
@@ -1927,12 +1940,18 @@ struct WorkspaceAgentMenuItems: View {
         Button {
             launch(input)
         } label: {
-            Label {
-                Text(title)
-            } icon: {
-                Image(nsImage: image)
-            }
+            menuLabel(title, image: image)
         }
+    }
+
+    /// macOS 菜单里 Label 默认只显示标题,显式 titleAndIcon 才带图标。
+    private func menuLabel(_ title: String, image: NSImage) -> some View {
+        Label {
+            Text(title)
+        } icon: {
+            Image(nsImage: image)
+        }
+        .labelStyle(.titleAndIcon)
     }
 }
 
