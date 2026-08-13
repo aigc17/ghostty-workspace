@@ -801,7 +801,7 @@ extension TerminalController {
         alert.messageText = title
         alert.addButton(withTitle: "确定")
         alert.addButton(withTitle: "取消")
-        let field = NSTextField(frame: .init(x: 0, y: 0, width: 260, height: 24))
+        let field = WorkspacePromptTextField(frame: .init(x: 0, y: 0, width: 260, height: 24))
         field.stringValue = current
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
@@ -822,15 +822,18 @@ extension TerminalController {
         alert.addButton(withTitle: "添加")
         alert.addButton(withTitle: "取消")
 
-        let nameField = NSTextField(frame: .init(x: 0, y: 32, width: 260, height: 24))
+        let nameField = WorkspacePromptTextField(frame: .init(x: 0, y: 32, width: 260, height: 24))
         nameField.placeholderString = "名称(如 Codex)"
-        let commandField = NSTextField(frame: .init(x: 0, y: 0, width: 260, height: 24))
+        let commandField = WorkspacePromptTextField(frame: .init(x: 0, y: 0, width: 260, height: 24))
         commandField.placeholderString = "启动命令(如 codex)"
         let container = NSView(frame: .init(x: 0, y: 0, width: 260, height: 56))
         container.addSubview(nameField)
         container.addSubview(commandField)
         alert.accessoryView = container
         alert.window.initialFirstResponder = nameField
+        // Tab 在两个输入框间切换。
+        nameField.nextKeyView = commandField
+        commandField.nextKeyView = nameField
 
         alert.beginSheetModal(for: window) { response in
             guard response == .alertFirstButtonReturn else { return }
@@ -1567,6 +1570,30 @@ struct WorkspaceReorderIndicator: View {
     }
 }
 
+/// NSAlert 附件输入框。Ghostty 主菜单的编辑快捷键(⌘C/⌘V 等)由 keybind
+/// 配置动态同步、面向终端动作,弹窗里的输入框收不到,这里自己兜底把
+/// 标准编辑快捷键转发给第一响应者(编辑时即 field editor)。
+final class WorkspacePromptTextField: NSTextField {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.type == .keyDown else { return super.performKeyEquivalent(with: event) }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let selector: Selector?
+        switch (event.charactersIgnoringModifiers?.lowercased(), flags) {
+        case ("c", [.command]): selector = #selector(NSText.copy(_:))
+        case ("v", [.command]): selector = #selector(NSText.paste(_:))
+        case ("x", [.command]): selector = #selector(NSText.cut(_:))
+        case ("a", [.command]): selector = #selector(NSText.selectAll(_:))
+        case ("z", [.command]): selector = Selector(("undo:"))
+        case ("z", [.command, .shift]): selector = Selector(("redo:"))
+        default: selector = nil
+        }
+        guard let selector, NSApp.sendAction(selector, to: nil, from: self) else {
+            return super.performKeyEquivalent(with: event)
+        }
+        return true
+    }
+}
+
 // MARK: - AI Agent 快捷启动
 
 /// 项目行上的 AI Agent 快捷启动:选一个 Agent,在该项目下新开对话并
@@ -1705,18 +1732,6 @@ enum WorkspaceAgentMenuPresenter {
         submenu(for: surface).popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 
-    /// 对话行入口:活对话在其终端里执行;已关闭的对话先激活(重建
-    /// shell)再自动执行启动命令。
-    static func present(activating session: WorkspaceSession, controller: TerminalController?) {
-        if let surface = session.primarySurface {
-            present(for: surface)
-            return
-        }
-        buildMenu(controller: controller) { [weak controller] input in
-            controller?.activateWorkspaceSession(session, initialInput: input)
-        }.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
-    }
-
     /// 终端右键菜单入口:同一套菜单挂为子菜单,命令在该终端执行。
     static func submenu(for surface: Ghostty.SurfaceView) -> NSMenu {
         let controller = surface.window?.windowController as? TerminalController
@@ -1727,7 +1742,7 @@ enum WorkspaceAgentMenuPresenter {
     }
 
     /// 在指定终端里执行启动命令。
-    private static func run(_ input: String, in surface: Ghostty.SurfaceView) {
+    static func run(_ input: String, in surface: Ghostty.SurfaceView) {
         // 菜单回调是 nonisolated 上下文,sendText 是 MainActor 隔离,
         // 显式跳回主线程。
         DispatchQueue.main.async {
@@ -1855,12 +1870,33 @@ final class WorkspaceAgentStore: ObservableObject {
     }
 }
 
-/// Agent 快捷启动菜单项列表(项目行 sparkles 菜单与右键菜单共用):
-/// 内置 Agent + 用户自定义 Agent + 添加/删除入口。
+/// Agent 快捷启动菜单项列表(项目行/对话行右键子菜单共用):
+/// 内置 Agent + 用户自定义 Agent + 添加/删除入口。`launch` 决定命令去向。
 struct WorkspaceAgentMenuItems: View {
-    let project: WorkspaceProject
     weak var controller: TerminalController?
+    let launch: (String) -> Void
     @ObservedObject private var store: WorkspaceAgentStore = .shared
+
+    /// 项目行入口:在该项目下新开对话并执行启动命令。
+    init(project: WorkspaceProject, controller: TerminalController?) {
+        self.controller = controller
+        self.launch = { [weak controller] input in
+            controller?.newWorkspaceSession(in: project, initialInput: input)
+        }
+    }
+
+    /// 对话行入口:活对话在其终端里执行;已关闭的对话先激活(重建
+    /// shell)再自动执行启动命令。
+    init(activating session: WorkspaceSession, controller: TerminalController?) {
+        self.controller = controller
+        self.launch = { [weak controller] input in
+            if let surface = session.primarySurface {
+                WorkspaceAgentMenuPresenter.run(input, in: surface)
+            } else {
+                controller?.activateWorkspaceSession(session, initialInput: input)
+            }
+        }
+    }
 
     var body: some View {
         ForEach(WorkspaceAgentLauncher.allCases) { agent in
@@ -1889,7 +1925,7 @@ struct WorkspaceAgentMenuItems: View {
 
     private func launchButton(_ title: String, image: NSImage, input: String) -> some View {
         Button {
-            controller?.newWorkspaceSession(in: project, initialInput: input)
+            launch(input)
         } label: {
             Label {
                 Text(title)
@@ -2637,7 +2673,7 @@ struct WorkspaceProjectSection: View {
             }
             .contextMenu {
                 Button("新建对话") { controller?.newWorkspaceSession(in: project) }
-                Menu("快捷启动 Agent") {
+                Menu("快捷启动 AI Agent") {
                     WorkspaceAgentMenuItems(project: project, controller: controller)
                 }
                 Divider()
@@ -2787,8 +2823,8 @@ struct WorkspaceSessionRow: View {
                 }
                 Divider()
             }
-            Button("快捷启动 AI Agent…") {
-                WorkspaceAgentMenuPresenter.present(activating: session, controller: controller)
+            Menu("快捷启动 AI Agent") {
+                WorkspaceAgentMenuItems(activating: session, controller: controller)
             }
             Divider()
             Button("重命名对话…") {
