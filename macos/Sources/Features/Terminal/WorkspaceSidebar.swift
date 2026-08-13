@@ -1599,7 +1599,7 @@ final class WorkspacePromptTextField: NSTextField {
 /// 项目行上的 AI Agent 快捷启动:选一个 Agent,在该项目下新开对话并
 /// 自动执行启动命令。固定集合,品牌色记号。
 enum WorkspaceAgentLauncher: String, CaseIterable, Identifiable {
-    case claude, cursor, grok, kimi, pi, droid
+    case claude, codex, cursor, grok, kimi, pi, droid
 
     var id: String { rawValue }
 
@@ -1607,6 +1607,7 @@ enum WorkspaceAgentLauncher: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .claude: return "Claude"
+        case .codex: return "Codex"
         case .cursor: return "Cursor"
         case .grok: return "Grok"
         case .kimi: return "Kimi"
@@ -1628,6 +1629,7 @@ enum WorkspaceAgentLauncher: String, CaseIterable, Identifiable {
     var glyph: String {
         switch self {
         case .claude: return "C"
+        case .codex: return "⌘"
         case .cursor: return "▮"
         case .grok: return "G"
         case .kimi: return "K"
@@ -1636,15 +1638,18 @@ enum WorkspaceAgentLauncher: String, CaseIterable, Identifiable {
         }
     }
 
-    /// 品牌近似色。真品牌 logo 需要素材文件进 Assets,先用色标记号。
+    /// 品牌色,取各家官方 App 图标/品牌规范的底色:
+    /// Claude #D97757、OpenAI/xAI/Cursor 官方为黑、Kimi 官方彩色版 #1783FF、
+    /// Factory 是暖黑(amber glow 品牌)。Pi 无明确品牌色,用青绿记号。
     var nsColor: NSColor {
         switch self {
-        case .claude: return NSColor(red: 0.85, green: 0.47, blue: 0.34, alpha: 1) // Anthropic 珊瑚橙
-        case .cursor: return NSColor(white: 0.25, alpha: 1)                        // Cursor 黑
-        case .grok: return NSColor(red: 0.55, green: 0.57, blue: 0.60, alpha: 1)   // xAI 石墨灰
-        case .kimi: return NSColor(red: 0.39, green: 0.40, blue: 0.95, alpha: 1)   // Kimi 靛蓝
+        case .claude: return NSColor(red: 0.85, green: 0.47, blue: 0.34, alpha: 1) // Anthropic 珊瑚橙 #D97757
+        case .codex: return NSColor(white: 0.05, alpha: 1)                         // OpenAI 黑
+        case .cursor: return NSColor(white: 0.05, alpha: 1)                        // Cursor 黑
+        case .grok: return NSColor(white: 0.05, alpha: 1)                          // xAI 黑
+        case .kimi: return NSColor(red: 0.09, green: 0.514, blue: 1.0, alpha: 1)   // Kimi 蓝 #1783FF
         case .pi: return NSColor(red: 0.06, green: 0.73, blue: 0.51, alpha: 1)     // Pi 青绿
-        case .droid: return NSColor(red: 0.22, green: 0.67, blue: 0.97, alpha: 1)  // Factory 天蓝
+        case .droid: return NSColor(red: 0.13, green: 0.11, blue: 0.09, alpha: 1)  // Factory 暖黑
         }
     }
 
@@ -1693,6 +1698,12 @@ private func workspaceAgentTile(
     let image = NSImage(size: .init(width: 16, height: 16), flipped: false) { rect in
         color.setFill()
         NSBezierPath(roundedRect: rect, xRadius: 4.5, yRadius: 4.5).fill()
+        // 一圈浅描边:黑色系品牌方块在深色菜单里也有轮廓。
+        NSColor.white.withAlphaComponent(0.16).setStroke()
+        let border = NSBezierPath(
+            roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
+        border.lineWidth = 1
+        border.stroke()
         content(rect.insetBy(dx: 3, dy: 3))
         return true
     }
