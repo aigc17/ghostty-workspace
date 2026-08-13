@@ -1648,47 +1648,76 @@ enum WorkspaceAgentLauncher: String, CaseIterable, Identifiable {
         }
     }
 
-    /// 菜单用品牌 logo:优先 Assets 里的官方图(AgentLogo-*,缓存 16pt
-    /// 稳定实例;Grok/Kimi 为 template 自适应菜单深浅色),缺素材的
-    /// 品牌(pi)回退到色标记号。
+    /// 菜单用品牌记号:统一 16pt 品牌色圆角方块 + 白色 logo 剪影。
+    /// 各家 logo 原始比例/墨迹大小不一,装进同一个方块视觉重量才一致;
+    /// 缺素材的品牌(pi)回退到字符记号(同款方块)。
     func menuImage() -> NSImage {
         let key = "logo-\(rawValue)"
         if let cached = workspaceAgentBadgeCache[key] { return cached }
         guard let asset = NSImage(named: "AgentLogo-\(rawValue)") else {
             return workspaceAgentBadgeImage(glyph: glyph, color: nsColor)
         }
-        let isTemplate = asset.isTemplate
-        let image = NSImage(size: .init(width: 16, height: 16), flipped: false) { rect in
-            asset.draw(in: rect)
-            return true
+        let silhouette = workspaceAgentSilhouette(asset)
+        let image = workspaceAgentTile(color: nsColor) { rect in
+            // 保持 logo 原始比例,在内容区里居中等比缩放。
+            let size = silhouette.size.width > 0 ? silhouette.size : rect.size
+            let scale = min(rect.width / size.width, rect.height / size.height)
+            silhouette.draw(in: .init(
+                x: rect.midX - size.width * scale / 2,
+                y: rect.midY - size.height * scale / 2,
+                width: size.width * scale,
+                height: size.height * scale))
         }
-        image.isTemplate = isTemplate
         workspaceAgentBadgeCache[key] = image
         return image
     }
+}
+
+/// 白色剪影:保留 alpha 层次,抹平各家 logo 的颜色与模板差异,
+/// 白色画在品牌色方块上深浅色菜单都可读。
+private func workspaceAgentSilhouette(_ asset: NSImage) -> NSImage {
+    let size = asset.size.width > 0 ? asset.size : NSSize(width: 16, height: 16)
+    return NSImage(size: size, flipped: false) { rect in
+        asset.draw(in: rect)
+        NSColor.white.setFill()
+        rect.fill(using: .sourceIn)
+        return true
+    }
+}
+
+/// 统一记号底:16pt 圆角方块,内容画在内缩后的区域。
+private func workspaceAgentTile(
+    color: NSColor,
+    content: @escaping (NSRect) -> Void
+) -> NSImage {
+    let image = NSImage(size: .init(width: 16, height: 16), flipped: false) { rect in
+        color.setFill()
+        NSBezierPath(roundedRect: rect, xRadius: 4.5, yRadius: 4.5).fill()
+        content(rect.insetBy(dx: 3, dy: 3))
+        return true
+    }
+    image.isTemplate = false
+    return image
 }
 
 /// 记号位图缓存:菜单每次求值都拿到全新 NSImage 会让 SwiftUI 菜单
 /// 适配器反复重建菜单项(项目一多会拖垮主线程),稳定实例是硬要求。
 private var workspaceAgentBadgeCache: [String: NSImage] = [:]
 
-/// 记号位图:彩圆底 + 白色字符。菜单会剥离符号配色,自绘位图不受
-/// 影响(同 WorkspaceColorTag.menuImage)。内置与自定义 Agent 共用。
+/// 记号位图:彩色圆角方块底 + 白色字符,和品牌 logo 记号同一款方块。
+/// 菜单会剥离符号配色,自绘位图不受影响(同 WorkspaceColorTag.menuImage)。
+/// 内置与自定义 Agent 共用。
 func workspaceAgentBadgeImage(glyph: String, color: NSColor) -> NSImage {
     let key = "\(glyph)#\(color.description)"
     if let cached = workspaceAgentBadgeCache[key] { return cached }
-    let image = NSImage(size: .init(width: 16, height: 16), flipped: false) { rect in
-        color.setFill()
-        NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1)).fill()
+    let image = workspaceAgentTile(color: color) { rect in
         let text = NSAttributedString(string: glyph, attributes: [
             .font: NSFont.systemFont(ofSize: 8.5, weight: .bold),
             .foregroundColor: NSColor.white,
         ])
         let size = text.size()
         text.draw(at: .init(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2))
-        return true
     }
-    image.isTemplate = false
     workspaceAgentBadgeCache[key] = image
     return image
 }
@@ -1891,6 +1920,15 @@ struct WorkspaceAgentMenuItems: View {
         self.controller = controller
         self.launch = { [weak controller] input in
             controller?.newWorkspaceSession(in: project, initialInput: input)
+        }
+    }
+
+    /// 分区标签栏入口:命令直接在该终端里执行。
+    init(runningIn surface: Ghostty.SurfaceView) {
+        self.controller = surface.window?.windowController as? TerminalController
+        self.launch = { [weak surface] input in
+            guard let surface else { return }
+            WorkspaceAgentMenuPresenter.run(input, in: surface)
         }
     }
 
@@ -2097,6 +2135,17 @@ struct WorkspacePaneHeader: View {
         .contentShape(Rectangle())
         .onHover { hovered = $0 }
         .help("拖动标签栏可把此终端停靠到其他分区")
+        .contextMenu {
+            // 与侧边栏对话行同一套 Agent 菜单,命令在本终端执行。
+            Menu("快捷启动 AI Agent") {
+                WorkspaceAgentMenuItems(runningIn: surface)
+            }
+            Divider()
+            Button("向右分屏") { split(.right) }
+            Button("向下分屏") { split(.down) }
+            Divider()
+            Button("关闭此终端") { closePane() }
+        }
         .gesture(
             DragGesture(minimumDistance: 4, coordinateSpace: .named(workspaceRootSpace))
                 .onChanged { value in
