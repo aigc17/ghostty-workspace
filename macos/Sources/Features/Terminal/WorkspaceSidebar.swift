@@ -1653,40 +1653,31 @@ enum WorkspaceAgentLauncher: String, CaseIterable, Identifiable {
         }
     }
 
-    /// 菜单用品牌记号:统一 16pt 品牌色圆角方块 + 白色 logo 剪影。
-    /// 各家 logo 原始比例/墨迹大小不一,装进同一个方块视觉重量才一致;
-    /// 缺素材的品牌(pi)回退到字符记号(同款方块)。
+    /// 菜单用品牌记号:官网 favicon 原图直出,统一 16pt 圆角方块裁切。
+    /// 透明背景的 logo(如 OpenAI 花瓣结)先垫白底,满幅方形图标会
+    /// 自然盖住白底;缺素材的品牌回退到字符记号。
     func menuImage() -> NSImage {
         let key = "logo-\(rawValue)"
         if let cached = workspaceAgentBadgeCache[key] { return cached }
         guard let asset = NSImage(named: "AgentLogo-\(rawValue)") else {
             return workspaceAgentBadgeImage(glyph: glyph, color: nsColor)
         }
-        let silhouette = workspaceAgentSilhouette(asset)
-        let image = workspaceAgentTile(color: nsColor) { rect in
-            // 保持 logo 原始比例,在内容区里居中等比缩放。
-            let size = silhouette.size.width > 0 ? silhouette.size : rect.size
-            let scale = min(rect.width / size.width, rect.height / size.height)
-            silhouette.draw(in: .init(
-                x: rect.midX - size.width * scale / 2,
-                y: rect.midY - size.height * scale / 2,
-                width: size.width * scale,
-                height: size.height * scale))
+        let image = NSImage(size: .init(width: 16, height: 16), flipped: false) { rect in
+            NSBezierPath(roundedRect: rect, xRadius: 4.5, yRadius: 4.5).addClip()
+            NSColor.white.setFill()
+            rect.fill()
+            asset.draw(in: rect)
+            // 一圈浅描边:黑底 favicon 在深色菜单里也有轮廓。
+            NSColor.white.withAlphaComponent(0.16).setStroke()
+            let border = NSBezierPath(
+                roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
+            border.lineWidth = 1
+            border.stroke()
+            return true
         }
+        image.isTemplate = false
         workspaceAgentBadgeCache[key] = image
         return image
-    }
-}
-
-/// 白色剪影:保留 alpha 层次,抹平各家 logo 的颜色与模板差异,
-/// 白色画在品牌色方块上深浅色菜单都可读。
-private func workspaceAgentSilhouette(_ asset: NSImage) -> NSImage {
-    let size = asset.size.width > 0 ? asset.size : NSSize(width: 16, height: 16)
-    return NSImage(size: size, flipped: false) { rect in
-        asset.draw(in: rect)
-        NSColor.white.setFill()
-        rect.fill(using: .sourceIn)
-        return true
     }
 }
 
